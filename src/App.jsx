@@ -316,8 +316,9 @@ function calculateSettleUp(players, games, bets, h2hBets, teamMatches, individua
       else { var wp = players.find(function(p) { return p.id === b.winner; }); if (wp) winIds = [wp.id]; }
       if (winIds.length === 0) return; // no valid winner — skip
       var loseIds = players.filter(function(p) { return winIds.indexOf(p.id) === -1; }).map(function(p) { return p.id; });
-      var totalPot = buyin * players.length;
-      var winEach = totalPot / winIds.length;
+      // Losers each pay buyin; that money is split among winners. Conserves money.
+      var loserPot = buyin * loseIds.length;
+      var winEach = loserPot / winIds.length;
       loseIds.forEach(function(pid) { balances[pid] = (balances[pid] || 0) - buyin; });
       winIds.forEach(function(pid) { balances[pid] = (balances[pid] || 0) + winEach; });
     });
@@ -402,7 +403,9 @@ function proj(lat, lng, w, h) {
 var COAST = [[53.0,-6.0],[53.15,-6.15],[53.25,-6.22],[53.34,-6.25],[53.4,-6.15],[53.45,-6.08],[53.55,-6.0],[53.65,-5.98],[53.75,-6.0],[53.85,-5.95],[53.95,-5.85],[54.0,-5.78],[54.05,-5.7],[54.1,-5.6],[54.15,-5.52],[54.2,-5.48],[54.25,-5.44],[54.3,-5.45],[54.35,-5.5],[54.38,-5.55],[54.42,-5.58],[54.48,-5.52],[54.52,-5.48],[54.58,-5.48],[54.65,-5.52],[54.7,-5.58],[54.75,-5.65],[54.8,-5.68],[54.85,-5.72],[54.9,-5.78],[54.95,-5.82],[55.0,-5.82],[55.05,-5.78],[55.1,-5.72],[55.15,-5.68],[55.18,-5.65],[55.22,-5.62],[55.25,-5.65],[55.28,-5.72],[55.3,-5.82],[55.32,-5.92],[55.34,-6.02],[55.35,-6.15],[55.33,-6.28],[55.3,-6.38],[55.27,-6.48],[55.24,-6.55],[55.22,-6.62],[55.21,-6.72],[55.22,-6.82],[55.21,-6.92],[55.18,-7.0],[55.14,-7.08],[55.08,-7.15],[55.0,-7.18],[54.92,-7.2],[54.85,-7.18],[54.78,-7.15],[54.7,-7.12],[54.6,-7.1],[54.5,-7.08],[54.42,-7.05],[54.35,-6.98],[54.28,-6.9],[54.2,-6.82],[54.15,-6.75],[54.1,-6.65],[54.05,-6.55],[54.0,-6.45],[53.95,-6.38],[53.88,-6.32],[53.8,-6.3],[53.7,-6.28],[53.6,-6.25],[53.5,-6.22],[53.4,-6.2],[53.34,-6.25]];
 
 // ─── STYLES ──────────────────────────────────────────────────────────
-var CL = { bg:"#0a1225", card:"#111d35", border:"#1e3354", red:"#dc2626", blue:"#5b9bff", cream:"#f0f4ff", text:"#cbd5e8", muted:"#8aa0c4" };
+// Higher-contrast palette: brighter body text, lighter muted gray (less blue),
+// and a card that lifts off the page for easier reading.
+var CL = { bg:"#0a1225", card:"#16294a", border:"#2a4570", red:"#f0454a", blue:"#6facff", cream:"#f0f4ff", text:"#e6edf8", muted:"#b3c2db" };
 
 var S = {
   app:        { background:CL.bg, minHeight:"100vh", maxWidth:480, margin:"0 auto", fontFamily:"'Georgia','Times New Roman',serif", color:CL.text, paddingBottom:80 },
@@ -410,14 +413,14 @@ var S = {
   loading:    { display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", height:"100vh", background:CL.bg, color:"#fff" },
   hero:       { background:"linear-gradient(135deg,#111d35 0%,#0a1225 50%,#0e1a30 100%)", padding:"48px 24px 28px", textAlign:"center", borderBottom:"2px solid "+CL.red },
   card:       { background:CL.card, border:"1px solid "+CL.border, borderRadius:8, margin:"12px 16px", padding:16 },
-  cardTitle:  { fontSize:13, fontWeight:700, color:CL.red, letterSpacing:2, textTransform:"uppercase", marginBottom:10, fontFamily:"system-ui" },
+  cardTitle:  { fontSize:14, fontWeight:700, color:CL.red, letterSpacing:1.5, textTransform:"uppercase", marginBottom:10, fontFamily:"system-ui" },
   pageHeader: { display:"flex", justifyContent:"space-between", alignItems:"center", padding:"20px 16px 8px" },
-  pageTitle:  { fontSize:22, fontWeight:700, color:"#fff", letterSpacing:1 },
-  input:      { width:"100%", padding:"10px 12px", background:"rgba(30,58,95,0.25)", border:"1px solid "+CL.border, borderRadius:6, color:"#fff", fontSize:14, marginBottom:8, fontFamily:"system-ui", boxSizing:"border-box" },
-  primaryBtn: { width:"100%", padding:12, background:CL.red, color:"#fff", border:"none", borderRadius:6, fontSize:14, fontWeight:700, cursor:"pointer", fontFamily:"system-ui" },
-  secondaryBtn:{ width:"100%", padding:10, background:"none", border:"1px solid "+CL.muted, borderRadius:6, color:CL.muted, fontSize:13, cursor:"pointer", fontFamily:"system-ui" },
-  addBtn:     { background:CL.red, color:"#fff", border:"none", borderRadius:6, padding:"8px 16px", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"system-ui" },
-  roundBtn:   { flex:1, padding:"10px 0", background:CL.card, border:"1px solid "+CL.border, borderRadius:6, color:CL.muted, fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"system-ui", minWidth:44 },
+  pageTitle:  { fontSize:24, fontWeight:700, color:"#fff", letterSpacing:1 },
+  input:      { width:"100%", padding:"11px 12px", background:"rgba(30,58,95,0.25)", border:"1px solid "+CL.border, borderRadius:6, color:"#fff", fontSize:15, marginBottom:8, fontFamily:"system-ui", boxSizing:"border-box" },
+  primaryBtn: { width:"100%", padding:13, background:CL.red, color:"#fff", border:"none", borderRadius:6, fontSize:15, fontWeight:700, cursor:"pointer", fontFamily:"system-ui" },
+  secondaryBtn:{ width:"100%", padding:11, background:"none", border:"1px solid "+CL.muted, borderRadius:6, color:CL.muted, fontSize:14, cursor:"pointer", fontFamily:"system-ui" },
+  addBtn:     { background:CL.red, color:"#fff", border:"none", borderRadius:6, padding:"9px 16px", fontSize:14, fontWeight:700, cursor:"pointer", fontFamily:"system-ui" },
+  roundBtn:   { flex:1, padding:"11px 0", background:CL.card, border:"1px solid "+CL.border, borderRadius:6, color:CL.muted, fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"system-ui", minWidth:44 },
   roundBtnOn: { background:CL.red, color:"#fff", borderColor:CL.red },
   holeBtn:    { background:"rgba(30,58,95,0.2)", border:"1px solid "+CL.border, borderRadius:4, padding:"4px 0", cursor:"pointer", textAlign:"center", minHeight:40 },
   holeFilled: { background:"rgba(37,99,235,0.35)", borderColor:CL.blue },
@@ -431,13 +434,13 @@ var S = {
   // Reusable patterns
   row:        { display:"flex", alignItems:"center", gap:12, padding:"10px 0" },
   separator:  { borderBottom:"1px solid "+CL.border },
-  subTab:     { flex:1, padding:"9px 0", borderRadius:6, fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"system-ui" },
+  subTab:     { flex:1, padding:"9px 0", borderRadius:6, fontSize:13.5, fontWeight:700, cursor:"pointer", fontFamily:"system-ui" },
   subTabOff:  { background:CL.card, border:"1px solid "+CL.border, color:CL.muted },
-  subTabOn:   { background:"rgba(220,38,38,0.15)", border:"1px solid "+CL.red, color:CL.red },
-  pillBtn:    { padding:"5px 11px", borderRadius:12, border:"1px solid "+CL.border, background:"rgba(30,58,95,0.2)", color:"#fff", fontSize:12, cursor:"pointer", fontFamily:"system-ui" },
-  teamBox:    { flex:1, borderRadius:6, padding:10, border:"1px solid "+CL.border, background:"rgba(30,58,95,0.15)" },
-  teamBoxWin: { border:"1px solid rgba(220,38,38,0.3)", background:"rgba(220,38,38,0.1)" },
-  label:      { fontSize:12.5, color:CL.muted, fontFamily:"system-ui", fontWeight:600 },
+  subTabOn:   { background:"rgba(240,69,74,0.18)", border:"1px solid "+CL.red, color:CL.red },
+  pillBtn:    { padding:"6px 12px", borderRadius:12, border:"1px solid "+CL.border, background:"rgba(40,69,112,0.3)", color:"#fff", fontSize:13, cursor:"pointer", fontFamily:"system-ui" },
+  teamBox:    { flex:1, borderRadius:6, padding:10, border:"1px solid "+CL.border, background:"rgba(40,69,112,0.2)" },
+  teamBoxWin: { border:"1px solid rgba(240,69,74,0.35)", background:"rgba(240,69,74,0.12)" },
+  label:      { fontSize:13.5, color:CL.muted, fontFamily:"system-ui", fontWeight:600 },
   white:      { color:"#fff" },
   bold:       { fontWeight:700 },
   sys:        { fontFamily:"system-ui" },
@@ -538,7 +541,7 @@ function PlayerSelectScreen(props) {
     <div style={Object.assign({}, S.loading, {padding:24, justifyContent:"flex-start", paddingTop:60})}>
       <img src="/logo.png" alt="Northern Irish Links 2026" onError={function(e){e.target.style.display="none";}} style={{width:100, height:100, marginBottom:12}} />
       <div style={{fontSize:20, fontWeight:700, color:"#fff", marginBottom:4}}>Who are you?</div>
-      <div style={{fontSize:13, color:CL.muted, fontFamily:"system-ui", marginBottom:24}}>Select your name to personalize the app</div>
+      <div style={{fontSize:14, color:CL.muted, fontFamily:"system-ui", marginBottom:24}}>Select your name to personalize the app</div>
 
       <div style={{width:"100%", maxWidth:340}}>
         {players.map(function(p) {
@@ -818,7 +821,7 @@ function HomeTab(props) {
             return (
               <div key={team.name} style={{marginBottom:12}}>
                 <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6}}>
-                  <div style={{fontSize:13, fontWeight:700, color:"#fff"}}>{team.emoji+" "+team.name}</div>
+                  <div style={{fontSize:14, fontWeight:700, color:"#fff"}}>{team.emoji+" "+team.name}</div>
                   <div style={{fontSize:11, color:CL.red, fontFamily:"system-ui", fontWeight:600}}>{"Total HI: "+totalHcp.toFixed(1)}</div>
                 </div>
                 <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:6}}>
@@ -827,7 +830,7 @@ function HomeTab(props) {
                       <div key={p.id} style={{background:"rgba(30,58,95,0.3)", borderRadius:6, padding:"10px 12px", display:"flex", alignItems:"center", gap:8}}>
                         <span style={{fontSize:18}}>{p.emoji}</span>
                         <div>
-                          <div style={{fontSize:15, fontWeight:600, color:"#fff"}}>{p.name}</div>
+                          <div style={{fontSize:16, fontWeight:600, color:"#fff"}}>{p.name}</div>
                           <div style={{fontSize:11, color:CL.blue, fontFamily:"system-ui", fontWeight:600}}>{"HI "+p.handicap}</div>
                         </div>
                       </div>
@@ -845,7 +848,7 @@ function HomeTab(props) {
         {HOTELS.map(function(h, i) {
           return (
             <div key={i} style={Object.assign({padding:"10px 0"}, i < HOTELS.length-1 ? S.separator : {})}>
-              <div style={{fontSize:15, fontWeight:600, color:"#fff"}}>{h.name}</div>
+              <div style={{fontSize:16, fontWeight:600, color:"#fff"}}>{h.name}</div>
               <div style={S.label}>{h.loc+" · "+h.nights+" ("+h.n+" nights)"}</div>
             </div>
           );
@@ -883,51 +886,30 @@ function TripMap() {
     }
   });
 
-  // Day markers on route segments
-  var dayLabels = [
-    { from:"dublin", to:"ardglass", label:"Day 1", num:"1" },
-    { from:"rcd", to:"castlerock", label:"Day 3", num:"3" },
-    { from:"portstewart", to:"conrad", label:"Day 5", num:"5" },
-  ];
-
   var selectedStop = sel ? MAP_STOPS.find(function(s) { return s.id===sel; }) : null;
   var selectedLeg = sel ? ROUTE_LEGS.filter(function(l) { return l.from===sel || l.to===sel; }) : [];
 
   return (
     <div style={{margin:"12px 16px"}}>
-      <div style={{borderRadius:12, overflow:"hidden", border:"1px solid "+CL.border, background:"#060c18"}}>
+      <div style={{borderRadius:12, overflow:"hidden", border:"1px solid "+CL.border, background:"#0a1322"}}>
         <svg width={W} height={H} viewBox={"0 0 "+W+" "+H} style={{display:"block", width:"100%", height:"auto"}}>
           <defs>
-            <radialGradient id="seaRG" cx="50%" cy="40%"><stop offset="0%" stopColor="#0c1830"/><stop offset="100%" stopColor="#060c18"/></radialGradient>
-            <linearGradient id="routeLG" x1="0" y1="1" x2="1" y2="0"><stop offset="0%" stopColor={CL.red}/><stop offset="100%" stopColor={CL.red} stopOpacity="0.4"/></linearGradient>
+            <radialGradient id="seaRG" cx="50%" cy="35%"><stop offset="0%" stopColor="#0e1c36"/><stop offset="100%" stopColor="#070e1d"/></radialGradient>
+            <linearGradient id="landLG" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#16284a"/><stop offset="100%" stopColor="#101f3a"/></linearGradient>
           </defs>
           <rect width={W} height={H} fill="url(#seaRG)"/>
 
           {/* Subtle grid */}
-          {Array.from({length:9}, function(_,i) { return <line key={"h"+i} x1={0} y1={(i+1)*H/9} x2={W} y2={(i+1)*H/9} stroke="#1a2d50" strokeWidth={0.3} opacity={0.3}/>; })}
-          {Array.from({length:9}, function(_,i) { return <line key={"v"+i} x1={(i+1)*W/9} y1={0} x2={(i+1)*W/9} y2={H} stroke="#1a2d50" strokeWidth={0.3} opacity={0.3}/>; })}
+          {Array.from({length:9}, function(_,i) { return <line key={"h"+i} x1={0} y1={(i+1)*H/9} x2={W} y2={(i+1)*H/9} stroke="#16284a" strokeWidth={0.3} opacity={0.25}/>; })}
+          {Array.from({length:9}, function(_,i) { return <line key={"v"+i} x1={(i+1)*W/9} y1={0} x2={(i+1)*W/9} y2={H} stroke="#16284a" strokeWidth={0.3} opacity={0.25}/>; })}
 
-          {/* Land mass with subtle inner glow */}
-          <path d={coastD} fill="#0f1d34" stroke="#1a3358" strokeWidth={1.5}/>
-          <path d={coastD} fill="none" stroke="#243f6a" strokeWidth={0.5} opacity={0.3}/>
+          {/* Land mass */}
+          <path d={coastD} fill="url(#landLG)" stroke="#2b4a78" strokeWidth={1.5}/>
+          <path d={coastD} fill="none" stroke="#3a5d8a" strokeWidth={0.5} opacity={0.4}/>
 
-          {/* Route line - smooth curves */}
-          <path d={routeD} fill="none" stroke={CL.red} strokeWidth={3} strokeDasharray="10,6" opacity={0.5} strokeLinecap="round"/>
-          <path d={routeD} fill="none" stroke={CL.red} strokeWidth={1.5} strokeDasharray="10,6" opacity={0.8} strokeLinecap="round"/>
-
-          {/* Day markers on long route segments */}
-          {dayLabels.map(function(dl) {
-            var f = cp(MAP_STOPS.find(function(s) { return s.id===dl.from; }));
-            var t = cp(MAP_STOPS.find(function(s) { return s.id===dl.to; }));
-            var mx = (f.x+t.x)/2, my = (f.y+t.y)/2;
-            return (
-              <g key={dl.num}>
-                <circle cx={mx} cy={my} r={10} fill={CL.red} opacity={0.15}/>
-                <circle cx={mx} cy={my} r={7} fill="#060c18" stroke={CL.red} strokeWidth={1}/>
-                <text x={mx} y={my+3.5} textAnchor="middle" fill={CL.red} fontSize={8} fontFamily="system-ui" fontWeight={800}>{dl.num}</text>
-              </g>
-            );
-          })}
+          {/* Route line - smooth, gold like PerryGolf */}
+          <path d={routeD} fill="none" stroke="#c9a04e" strokeWidth={3.5} opacity={0.35} strokeLinecap="round"/>
+          <path d={routeD} fill="none" stroke="#e3c178" strokeWidth={1.8} strokeDasharray="2,5" opacity={0.9} strokeLinecap="round"/>
 
           {/* Drive time badges (shown when a stop is selected) */}
           {selectedLeg.map(function(leg, i) {
@@ -936,8 +918,8 @@ function TripMap() {
             var mx = (f.x+t.x)/2, my = (f.y+t.y)/2;
             return (
               <g key={"leg"+i}>
-                <rect x={mx-18} y={my-9} width={36} height={18} rx={9} fill="#0c1628" stroke="#fff" strokeWidth={0.5} opacity={0.95}/>
-                <text x={mx} y={my+4} textAnchor="middle" fill="#fff" fontSize={8} fontFamily="system-ui" fontWeight={700}>{leg.time}</text>
+                <rect x={mx-20} y={my-9} width={40} height={18} rx={9} fill="#0a1322" stroke="#e3c178" strokeWidth={0.75} opacity={0.97}/>
+                <text x={mx} y={my+4} textAnchor="middle" fill="#e3c178" fontSize={8} fontFamily="system-ui" fontWeight={700}>{leg.time}</text>
               </g>
             );
           })}
@@ -945,33 +927,33 @@ function TripMap() {
           {/* Stop markers */}
           {MAP_STOPS.map(function(s) {
             var p = cp(s), isSel = sel===s.id;
-            var fill = s.type==="course" ? CL.red : s.type==="hotel" ? CL.blue : "#fff";
+            var fill = s.type==="course" ? "#e3c178" : s.type==="hotel" ? CL.blue : "#fff";
             var r = s.type==="course" ? 8 : 6;
             var off = labelOffsets[s.id] || {dx:0, dy:-14};
 
             return (
               <g key={s.id} onClick={function() { setSel(isSel ? null : s.id); }} style={{cursor:"pointer"}}>
                 {/* Selection ring */}
-                {isSel && <g><circle cx={p.x} cy={p.y} r={r+8} fill={fill} opacity={0.1}/><circle cx={p.x} cy={p.y} r={r+5} fill="none" stroke={fill} strokeWidth={1} opacity={0.4}/></g>}
+                {isSel && <g><circle cx={p.x} cy={p.y} r={r+8} fill={fill} opacity={0.12}/><circle cx={p.x} cy={p.y} r={r+5} fill="none" stroke={fill} strokeWidth={1} opacity={0.5}/></g>}
 
                 {/* Marker */}
-                <circle cx={p.x} cy={p.y} r={r} fill={fill} stroke="#060c18" strokeWidth={2.5}/>
+                <circle cx={p.x} cy={p.y} r={r} fill={fill} stroke="#0a1322" strokeWidth={2.5}/>
 
                 {/* Round label inside course markers */}
-                {s.type==="course" && <text x={p.x} y={p.y+3} textAnchor="middle" fill="#fff" fontSize={8} fontFamily="system-ui" fontWeight={800}>{s.short}</text>}
+                {s.type==="course" && <text x={p.x} y={p.y+3} textAnchor="middle" fill="#0a1322" fontSize={8} fontFamily="system-ui" fontWeight={800}>{s.short}</text>}
 
                 {/* Name label with offset */}
-                <text x={p.x+off.dx} y={p.y+off.dy} textAnchor={off.dx > 0 ? "start" : off.dx < 0 ? "end" : "middle"} fill={isSel ? "#fff" : "#7a8eb0"} fontSize={isSel ? 10 : 9} fontFamily="system-ui" fontWeight={isSel ? 700 : 500}>{s.label}</text>
+                <text x={p.x+off.dx} y={p.y+off.dy} textAnchor={off.dx > 0 ? "start" : off.dx < 0 ? "end" : "middle"} fill={isSel ? "#fff" : "#8aa0c4"} fontSize={isSel ? 10 : 9} fontFamily="system-ui" fontWeight={isSel ? 700 : 500}>{s.label}</text>
               </g>
             );
           })}
 
           {/* Legend - compact top-left */}
           <g transform="translate(12,12)">
-            <rect x={-4} y={-4} width={70} height={40} rx={4} fill="#060c18" opacity={0.85} stroke={CL.border} strokeWidth={0.5}/>
-            <circle cx={6} cy={6} r={3.5} fill={CL.red}/><text x={14} y={9} fill="#7a8eb0" fontSize={7} fontFamily="system-ui">Course</text>
-            <circle cx={6} cy={18} r={3} fill={CL.blue}/><text x={14} y={21} fill="#7a8eb0" fontSize={7} fontFamily="system-ui">Hotel</text>
-            <circle cx={6} cy={30} r={3} fill="#fff"/><text x={14} y={33} fill="#7a8eb0" fontSize={7} fontFamily="system-ui">Airport</text>
+            <rect x={-4} y={-4} width={70} height={40} rx={4} fill="#0a1322" opacity={0.85} stroke={CL.border} strokeWidth={0.5}/>
+            <circle cx={6} cy={6} r={3.5} fill="#e3c178"/><text x={14} y={9} fill="#8aa0c4" fontSize={7} fontFamily="system-ui">Course</text>
+            <circle cx={6} cy={18} r={3} fill={CL.blue}/><text x={14} y={21} fill="#8aa0c4" fontSize={7} fontFamily="system-ui">Hotel</text>
+            <circle cx={6} cy={30} r={3} fill="#fff"/><text x={14} y={33} fill="#8aa0c4" fontSize={7} fontFamily="system-ui">Airport</text>
           </g>
         </svg>
       </div>
@@ -1031,11 +1013,13 @@ function wmoCondition(code) {
   return "Thunderstorms";
 }
 
-// Weather locations along the trip (lat/lng + label)
+// Weather locations along the trip (lat/lng + label) — one per course area
 var WEATHER_LOCATIONS = [
-  { key:"newcastle", label:"Newcastle (RCD / Ardglass)", lat:54.2179, lng:-5.8869 },
-  { key:"portrush", label:"Portrush (Portrush / Portstewart)", lat:55.2057, lng:-6.6562 },
+  { key:"ardglass", label:"Ardglass", lat:54.2608, lng:-5.6100 },
+  { key:"newcastle", label:"Royal County Down", lat:54.2150, lng:-5.8960 },
   { key:"castlerock", label:"Castlerock", lat:55.1647, lng:-6.7742 },
+  { key:"portrush", label:"Royal Portrush", lat:55.2069, lng:-6.6561 },
+  { key:"portstewart", label:"Portstewart", lat:55.1833, lng:-6.7233 },
 ];
 
 function WeatherCard(props) {
@@ -1103,7 +1087,7 @@ function WeatherCard(props) {
   return (
     <div style={S.card}>
       <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10}}>
-        <div style={S.cardTitle}>🌤️ Weather Forecast</div>
+        <div style={S.cardTitle}>🌤️ Weather at Each Course</div>
         <button onClick={function() { fetchWeather(locIdx); }} disabled={loading} style={Object.assign({}, S.addBtn, {fontSize:11, opacity:loading?0.6:1})}>
           {loading ? "Loading..." : "Refresh"}
         </button>
@@ -1130,8 +1114,8 @@ function WeatherCard(props) {
             return (
               <div key={i} style={Object.assign({display:"flex", alignItems:"center", padding:"8px 0", gap:8}, i < w.forecast.length-1 ? S.separator : {})}>
                 <div style={{fontSize:22, width:32, textAlign:"center"}}>{weatherIcon(d.condition)}</div>
-                <div style={{flex:1}}><div style={{fontSize:13, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{d.day}</div><div style={S.label}>{d.condition}</div></div>
-                <div style={{textAlign:"right"}}><div style={{fontSize:13, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{d.hi+"° / "+d.lo+"°"}</div><div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>{"🌧 "+d.rain_pct+"% · 💨 "+d.wind_mph+"mph"}</div></div>
+                <div style={{flex:1}}><div style={{fontSize:14, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{d.day}</div><div style={S.label}>{d.condition}</div></div>
+                <div style={{textAlign:"right"}}><div style={{fontSize:14, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{d.hi+"° / "+d.lo+"°"}</div><div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>{"🌧 "+d.rain_pct+"% · 💨 "+d.wind_mph+"mph"}</div></div>
               </div>
             );
           })}
@@ -1145,77 +1129,65 @@ function WeatherCard(props) {
 function ItineraryTab(props) {
   var es = useState(null); var exp = es[0], setExp = es[1];
 
+  // Map each day to its inbound shuttle leg (the drive that gets you TO that day's activity)
+  var legByDay = {
+    1: { label:"Dublin Airport → Ardglass", time:"2h" },
+    3: { label:"Royal County Down → Castlerock", time:"2h 20m" },
+    4: { label:"Bushmills → Royal Portrush", time:"15m" },
+    5: { label:"Castlerock area → Portstewart", time:"25m" },
+  };
+
   return (
     <div>
       <div style={S.pageHeader}><div style={S.pageTitle}>Trip Itinerary</div></div>
       <TripMap />
 
-      {/* Shuttle / transfer schedule */}
-      <div style={S.card}>
-        <div style={S.cardTitle}>🚐 Shuttle Schedule</div>
-        <div style={Object.assign({}, S.label, {marginBottom:10})}>PerryGolf VIP coach transfers between every stop.</div>
-        {(function() {
-          var stopMap = {};
-          MAP_STOPS.forEach(function(s) { stopMap[s.id] = s; });
-          var dayByStop = { ardglass:"Sat Jun 27", rcd:"Sun Jun 28", castlerock:"Mon Jun 29", portrush:"Tue Jun 30", portstewart:"Wed Jul 1" };
-          return ROUTE_LEGS.map(function(leg, i) {
-            var from = stopMap[leg.from], to = stopMap[leg.to];
-            if (!from || !to) return null;
-            var dayLabel = dayByStop[leg.to] || "";
-            return (
-              <div key={i} style={Object.assign({display:"flex", alignItems:"center", gap:10, padding:"10px 0"}, i < ROUTE_LEGS.length-1 ? S.separator : {})}>
-                <div style={{flex:1}}>
-                  <div style={{fontSize:14, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{from.label}</div>
-                  <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", margin:"2px 0"}}>{"↓ to"}</div>
-                  <div style={{fontSize:14, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{to.label}</div>
-                  {dayLabel && <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui", marginTop:2}}>{dayLabel}</div>}
-                </div>
-                <div style={{textAlign:"center", background:"rgba(91,155,255,0.12)", border:"1px solid rgba(91,155,255,0.3)", borderRadius:8, padding:"8px 12px", minWidth:64}}>
-                  <div style={{fontSize:16}}>🚐</div>
-                  <div style={{fontSize:14, fontWeight:700, color:CL.blue, fontFamily:"system-ui"}}>{leg.time}</div>
-                </div>
-              </div>
-            );
-          });
-        })()}
-        <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui", marginTop:8, textAlign:"center"}}>Drive times approximate · subject to traffic & weather</div>
-      </div>
-
-      <WeatherCard weatherCache={props.weatherCache} update={props.update} />
-
+      {/* Day-by-day cards */}
       {ITINERARY.map(function(day, i) {
         var isGolf = day.type==="golf";
         var course = isGolf ? COURSES[day.courseIdx] : null;
         var open = exp===i;
+        var inboundLeg = legByDay[day.day];
         return (
           <div key={i} style={S.card} onClick={function() { setExp(open?null:i); }}>
             <div style={{display:"flex", alignItems:"center", gap:12}}>
-              <div style={{width:42, height:42, borderRadius:21, background:isGolf?"rgba(220,38,38,0.15)":"rgba(37,99,235,0.1)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, flexShrink:0}}>
+              <div style={{width:42, height:42, borderRadius:21, background:isGolf?"rgba(227,193,120,0.15)":"rgba(37,99,235,0.1)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, flexShrink:0}}>
                 {isGolf ? "⛳" : day.type==="free" ? "🍺" : "✈️"}
               </div>
               <div style={{flex:1}}>
                 <div style={{fontSize:11, color:CL.red, fontFamily:"system-ui", fontWeight:600}}>{day.date}</div>
-                <div style={{fontSize:16, fontWeight:700, color:"#fff"}}>{day.title}</div>
+                <div style={{fontSize:17, fontWeight:700, color:"#fff"}}>{day.title}</div>
                 {isGolf && <div style={S.label}>{"Tee: "+day.teeTime+" · Par "+course.par}</div>}
               </div>
               <div style={{color:CL.muted, fontSize:16}}>{open ? "▾" : "›"}</div>
             </div>
 
+            {/* Shuttle inline — always visible if there's an inbound transfer */}
+            {inboundLeg && (
+              <div style={{display:"flex", alignItems:"center", gap:8, marginTop:10, padding:"8px 10px", background:"rgba(91,155,255,0.08)", borderRadius:6, border:"1px solid rgba(91,155,255,0.2)"}}>
+                <div style={{fontSize:16}}>🚐</div>
+                <div style={{flex:1, fontSize:12, color:CL.text, fontFamily:"system-ui"}}>{inboundLeg.label}</div>
+                <div style={{fontSize:13, fontWeight:700, color:CL.blue, fontFamily:"system-ui"}}>{inboundLeg.time}</div>
+              </div>
+            )}
+
+            {/* Events — always visible */}
             {day.events && day.events.map(function(ev, ei) {
               return (
                 <div key={ei} style={S.eventCard}>
                   <div style={{fontSize:20, flexShrink:0}}>{ev.icon}</div>
                   <div style={{flex:1}}>
-                    <div style={{fontSize:13, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{ev.name}</div>
+                    <div style={{fontSize:15, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{ev.name}</div>
                     <div style={S.label}>{ev.time+(ev.detail ? " · "+ev.detail : "")}</div>
                   </div>
                 </div>
               );
             })}
 
+            {/* Expanded detail */}
             {open && (
               <div style={{marginTop:12, paddingTop:12, borderTop:"1px solid "+CL.border}}>
-                <div style={{fontSize:13, color:CL.text, lineHeight:1.5, fontFamily:"system-ui"}}>{day.description}</div>
+                <div style={{fontSize:14, color:CL.text, lineHeight:1.5, fontFamily:"system-ui"}}>{day.description}</div>
                 {isGolf && course.note && <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", marginTop:8, fontStyle:"italic"}}>{course.note}</div>}
                 {isGolf && (
                   <div style={{display:"flex", gap:12, marginTop:6}}>
@@ -1223,26 +1195,51 @@ function ItineraryTab(props) {
                     {course.scorecard && course.scorecard !== course.url && <a href={course.scorecard} target="_blank" rel="noopener" style={{fontSize:12, color:CL.blue, fontFamily:"system-ui", textDecoration:"none"}} onClick={function(e) { e.stopPropagation(); }}>Scorecard ›</a>}
                   </div>
                 )}
-                {day.hotel && <div style={{marginTop:10, padding:8, background:"rgba(37,99,235,0.1)", borderRadius:4}}><div style={{fontSize:11, color:CL.blue, fontFamily:"system-ui", fontWeight:600}}>HOTEL</div><div style={{fontSize:13, color:"#fff", fontFamily:"system-ui"}}>{day.hotel}</div><div style={S.label}>{day.hotelLoc}</div></div>}
-                {day.driveToHotel && <div style={Object.assign({}, S.label, {marginTop:6})}>{"🚐 "+day.driveToHotel}</div>}
-                {day.sightseeing && <div style={{marginTop:10, padding:8, background:"rgba(220,38,38,0.06)", borderRadius:4, border:"1px solid rgba(220,38,38,0.15)"}}><div style={{fontSize:11, color:CL.red, fontFamily:"system-ui", fontWeight:600}}>SIGHTSEEING</div><div style={{fontSize:12, color:CL.text, fontFamily:"system-ui", lineHeight:1.4}}>{day.sightseeing}</div></div>}
+                {day.hotel && <div style={{marginTop:10, padding:8, background:"rgba(37,99,235,0.1)", borderRadius:4}}><div style={{fontSize:11, color:CL.blue, fontFamily:"system-ui", fontWeight:600}}>🏨 HOTEL</div><div style={{fontSize:13, color:"#fff", fontFamily:"system-ui"}}>{day.hotel}</div><div style={S.label}>{day.hotelLoc}</div></div>}
+                {day.driveToHotel && <div style={{display:"flex", alignItems:"center", gap:8, marginTop:8, padding:"8px 10px", background:"rgba(91,155,255,0.08)", borderRadius:6}}><div style={{fontSize:14}}>🚐</div><div style={{fontSize:12, color:CL.text, fontFamily:"system-ui"}}>{day.driveToHotel}</div></div>}
+                {day.sightseeing && <div style={{marginTop:10, padding:8, background:"rgba(220,38,38,0.06)", borderRadius:4, border:"1px solid rgba(220,38,38,0.15)"}}><div style={{fontSize:11, color:CL.red, fontFamily:"system-ui", fontWeight:600}}>📸 SIGHTSEEING</div><div style={{fontSize:12, color:CL.text, fontFamily:"system-ui", lineHeight:1.4}}>{day.sightseeing}</div></div>}
               </div>
             )}
           </div>
         );
       })}
 
+      {/* Tee Times summary */}
+      <div style={S.card}>
+        <div style={S.cardTitle}>⛳ Tee Times</div>
+        {COURSES.map(function(c, i) {
+          var golfDay = ITINERARY.find(function(d) { return d.courseIdx === i && d.type === "golf"; });
+          return (
+            <div key={i} style={Object.assign({display:"flex", justifyContent:"space-between", alignItems:"center", padding:"11px 0"}, i < COURSES.length-1 ? S.separator : {})}>
+              <div style={{flex:1}}>
+                <div style={{fontSize:16, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{c.name}</div>
+                <div style={S.label}>{(golfDay ? golfDay.date+" · " : "")+"Par "+c.par}</div>
+              </div>
+              <div style={{textAlign:"right", background:"rgba(227,193,120,0.12)", border:"1px solid rgba(227,193,120,0.3)", borderRadius:8, padding:"6px 12px", minWidth:80}}>
+                <div style={{fontSize:15, fontWeight:700, color:"#e3c178", fontFamily:"system-ui"}}>{golfDay ? golfDay.teeTime : "—"}</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Weather at each course location */}
+      <WeatherCard weatherCache={props.weatherCache} update={props.update} />
+
+      {/* Emergency contacts */}
       <div style={S.card}>
         <div style={S.cardTitle}>🚨 Emergency Contacts</div>
         {CONTACTS.map(function(c, i) {
           return (
             <div key={i} style={Object.assign({display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 0"}, i < CONTACTS.length-1 ? S.separator : {})}>
-              <div><div style={{fontSize:15, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{c.name}</div><div style={S.label}>{c.note}</div></div>
+              <div><div style={{fontSize:16, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{c.name}</div><div style={S.label}>{c.note}</div></div>
               <a href={"tel:"+c.phone.replace(/\s/g,"")} style={{fontSize:13, color:CL.blue, fontFamily:"system-ui", fontWeight:600, textDecoration:"none"}} onClick={function(e) { e.stopPropagation(); }}>{c.phone}</a>
             </div>
           );
         })}
       </div>
+
+      {/* Quick reference */}
       <div style={S.card}>
         <div style={S.cardTitle}>ℹ️ Quick Reference</div>
         {QUICK_REF.map(function(item, i) {
@@ -1326,8 +1323,8 @@ function ScoresTab(props) {
                 return (
                   <div key={si} style={{marginBottom:12, padding:12, background:"rgba(37,99,235,0.1)", borderRadius:6, border:"1px solid rgba(37,99,235,0.2)"}}>
                     <div style={{display:"flex", justifyContent:"space-between", marginBottom:6}}>
-                      <div style={{fontSize:13, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{sp.name}</div>
-                      <div style={{fontSize:13, fontWeight:700, color:CL.red, fontFamily:"system-ui"}}>{total > 0 ? total : ""}</div>
+                      <div style={{fontSize:14, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{sp.name}</div>
+                      <div style={{fontSize:14, fontWeight:700, color:CL.red, fontFamily:"system-ui"}}>{total > 0 ? total : ""}</div>
                     </div>
                     <div style={{display:"grid", gridTemplateColumns:"repeat(9,1fr)", gap:2, marginBottom:8}}>
                       {sp.scores.slice(0,18).map(function(sc,hi) {
@@ -1407,7 +1404,7 @@ function ScoresTab(props) {
         return (
           <div key={player.id} style={S.card}>
             <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4}}>
-              <span style={{fontSize:15, fontWeight:600, color:"#fff"}}>{player.emoji+" "+player.name}</span>
+              <span style={{fontSize:16, fontWeight:600, color:"#fff"}}>{player.emoji+" "+player.name}</span>
               <div style={{display:"flex", gap:10, alignItems:"center"}}>
                 <div style={{textAlign:"center"}}>
                   <div style={{fontSize:9, color:CL.muted, fontFamily:"system-ui"}}>GROSS</div>
@@ -1457,7 +1454,7 @@ function ScoresTab(props) {
               <div style={{fontSize:18, fontWeight:700, color:"#fff"}}>
                 {"Hole "+(hole.hole+1)}
               </div>
-              <div style={{fontSize:13, color:CL.muted, fontFamily:"system-ui", marginTop:2}}>
+              <div style={{fontSize:14, color:CL.muted, fontFamily:"system-ui", marginTop:2}}>
                 {(players.find(function(p) { return p.id===hole.playerId; }) || {}).name}
               </div>
               <div style={{display:"flex", justifyContent:"center", gap:16, marginTop:8}}>
@@ -1561,7 +1558,7 @@ function LeaderboardTab(props) {
                 <div key={p.id} style={Object.assign({display:"flex", alignItems:"center", padding:"12px 0", gap:12}, S.separator, i===0 ? {background:"rgba(220,38,38,0.08)", margin:"-4px -8px 0", padding:"14px 8px", borderRadius:6} : {})}>
                   <div style={{fontSize:20, width:32, textAlign:"center"}}>{i===0?"🥇":i===1?"🥈":i===2?"🥉":i+1}</div>
                   <div style={{flex:1}}>
-                    <div style={{fontSize:15, fontWeight:600, color:"#fff"}}>{p.emoji+" "+p.name}</div>
+                    <div style={{fontSize:16, fontWeight:600, color:"#fff"}}>{p.emoji+" "+p.name}</div>
                     <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui"}}>{"HI: "+p.handicap}</div>
                     <div style={{display:"flex", gap:8, marginTop:2, flexWrap:"wrap"}}>
                       {COURSES.map(function(_,ci) {
@@ -1670,10 +1667,17 @@ function BetsTab(props) {
 
   function netMoney(pid) {
     var total = games.reduce(function(t,g) { return t+((g.results && g.results[pid])||0); }, 0);
-    // Add prop bet winnings
+    // Add prop bet winnings (team or individual winner)
+    var matchupP = TEAM_MATCHUPS[0];
     bets.forEach(function(b) {
       if (!b.settled || !b.winner || !b.buyin) return;
-      if (pid === b.winner) total += b.buyin * (players.length - 1);
+      var winIds = [];
+      if (b.winner === "teamA") winIds = resolveTeam(matchupP.teamA, players);
+      else if (b.winner === "teamB") winIds = resolveTeam(matchupP.teamB, players);
+      else winIds = [b.winner];
+      if (winIds.length === 0) return;
+      var loseCount = players.length - winIds.length;
+      if (winIds.indexOf(pid) >= 0) total += (b.buyin * loseCount) / winIds.length;
       else total -= b.buyin;
     });
     // Add individual prop bet winnings
@@ -1772,7 +1776,7 @@ function BetsTab(props) {
                 <div key={bet.id} style={Object.assign({padding:"10px 0"}, S.separator)}>
                   <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
                     <div>
-                      <div style={{fontSize:14, color:bet.settled?CL.muted:"#fff", fontWeight:600, textDecoration:bet.settled?"line-through":"none"}}>{bet.name}</div>
+                      <div style={{fontSize:15, color:bet.settled?CL.muted:"#fff", fontWeight:600, textDecoration:bet.settled?"line-through":"none"}}>{bet.name}</div>
                       <div style={{fontSize:11, color:CL.red, fontFamily:"system-ui"}}>{"$"+bet.buyin+"/player · $"+pot+" pot"}</div>
                     </div>
                     {bet.settled && <button style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:10, fontFamily:"system-ui"}} onClick={function() { update({bets:bets.map(function(b) { return b.id===bet.id ? Object.assign({},b,{settled:false,winner:null}) : b; })}); }}>Reset</button>}
@@ -1804,13 +1808,13 @@ function BetsTab(props) {
               return (
                 <div key={prop.id} style={Object.assign({padding:"12px 0"}, S.separator)}>
                   <div style={{flex:1}}>
-                    <div style={{fontSize:14, fontWeight:600, color:prop.settled?CL.muted:"#fff", textDecoration:prop.settled?"line-through":"none"}}>{prop.name}</div>
+                    <div style={{fontSize:15, fontWeight:600, color:prop.settled?CL.muted:"#fff", textDecoration:prop.settled?"line-through":"none"}}>{prop.name}</div>
                     {prop.desc && <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", marginTop:2}}>{prop.desc}</div>}
                     <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginTop:2}}>{"$"+(prop.buyin||10)+"/player · $"+pot+" pot"}</div>
                   </div>
                   {prop.settled ? (
                     <div style={{marginTop:6}}>
-                      <div style={{fontSize:13, color:"#22c55e", fontFamily:"system-ui"}}>{"🏆 "+(winner ? winner.emoji+" "+winner.name+" wins $"+(pot-(prop.buyin||10)) : "Winner")}</div>
+                      <div style={{fontSize:14, color:"#22c55e", fontFamily:"system-ui"}}>{"🏆 "+(winner ? winner.emoji+" "+winner.name+" wins $"+(pot-(prop.buyin||10)) : "Winner")}</div>
                       <button onClick={function() { update({individualProps:individualProps.map(function(x) { return x.id===prop.id ? Object.assign({},x,{settled:false,winner:null}) : x; })}); }} style={{marginTop:6, fontSize:11, color:CL.muted, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:6, padding:"5px 12px", cursor:"pointer"}}>↩ Undo</button>
                     </div>
                   ) : (
@@ -1845,14 +1849,14 @@ function BetsTab(props) {
                     <div style={{display:"flex", gap:12, marginBottom:12, padding:12, background:"rgba(30,58,95,0.2)", borderRadius:8}}>
                       <div style={{flex:1, textAlign:"center"}}>
                         <div style={{fontSize:28}}>{matchup.teamA.emoji}</div>
-                        <div style={{fontSize:13, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{matchup.teamA.name}</div>
+                        <div style={{fontSize:14, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{matchup.teamA.name}</div>
                         <div style={{fontSize:28, fontWeight:700, color:aWins > bWins ? CL.red : CL.muted, fontFamily:"system-ui"}}>{aWins}</div>
                         <div style={S.label}>rounds won</div>
                       </div>
                       <div style={{display:"flex", alignItems:"center", color:CL.muted, fontFamily:"system-ui", fontWeight:700}}>vs</div>
                       <div style={{flex:1, textAlign:"center"}}>
                         <div style={{fontSize:28}}>{matchup.teamB.emoji}</div>
-                        <div style={{fontSize:13, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{matchup.teamB.name}</div>
+                        <div style={{fontSize:14, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{matchup.teamB.name}</div>
                         <div style={{fontSize:28, fontWeight:700, color:bWins > aWins ? CL.red : CL.muted, fontFamily:"system-ui"}}>{bWins}</div>
                         <div style={S.label}>rounds won</div>
                       </div>
@@ -1867,7 +1871,7 @@ function BetsTab(props) {
                         </div>
                         {match.settled ? (
                           <div>
-                            <div style={{fontSize:13, color:"#22c55e", fontFamily:"system-ui", marginBottom:4}}>
+                            <div style={{fontSize:14, color:"#22c55e", fontFamily:"system-ui", marginBottom:4}}>
                               {"🏆 " + (match.winner === "a" ? matchup.teamA.emoji + " " + matchup.teamA.name : matchup.teamB.emoji + " " + matchup.teamB.name) + " win!"}
                             </div>
                             <button onClick={function() { update({teamMatches:teamMatches.map(function(m) { return m.id === match.id ? Object.assign({},m,{settled:false,winner:null}) : m; })}); }} style={{fontSize:10, color:CL.muted, fontFamily:"system-ui", background:"none", border:"none", cursor:"pointer", padding:0}}>Reset</button>
@@ -1933,7 +1937,7 @@ function BetsTab(props) {
                   <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start"}}>
                     <div style={{flex:1}}>
                       {bet.course && <div style={{display:"inline-block", fontSize:10, fontWeight:700, color:"#22c55e", fontFamily:"system-ui", background:"rgba(34,197,94,0.12)", padding:"2px 8px", borderRadius:10, marginBottom:4}}>{bet.course}</div>}
-                      <div style={{fontSize:14, fontWeight:600, color:bet.settled?CL.muted:"#fff", textDecoration:bet.settled?"line-through":"none"}}>{bet.description}</div>
+                      <div style={{fontSize:15, fontWeight:600, color:bet.settled?CL.muted:"#fff", textDecoration:bet.settled?"line-through":"none"}}>{bet.description}</div>
                       <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui"}}>{"$"+bet.stake+"/person · $"+totalPot+" pot"}</div>
                     </div>
                     <button style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:14, flexShrink:0}} onClick={function() { update({h2hBets:h2hBets.filter(function(b) { return b.id!==bet.id; })}); }}>✕</button>
@@ -1980,7 +1984,7 @@ function BetsTab(props) {
                   {/* Settle buttons */}
                   {bet.settled ? (
                     <div style={{marginTop:6}}>
-                      <div style={{fontSize:13, color:"#22c55e", fontFamily:"system-ui"}}>
+                      <div style={{fontSize:14, color:"#22c55e", fontFamily:"system-ui"}}>
                         {"🏆 Side "+(winSide==="a"?"A":"B")+" wins! Each winner gets $"+Math.round(bet.stake * (winSide==="a"?sideB:sideA).length / (winSide==="a"?sideA:sideB).length)}
                       </div>
                       <button onClick={function() { update({h2hBets:h2hBets.map(function(b) { return b.id===bet.id ? Object.assign({}, b, {settled:false, winningSide:null, winner:null}) : b; })}); }} style={{marginTop:6, fontSize:11, color:CL.muted, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:6, padding:"5px 12px", cursor:"pointer"}}>↩ Undo — reopen bet</button>
@@ -2098,14 +2102,14 @@ function BetsTab(props) {
                     return (
                       <div key={i} style={{display:"flex", alignItems:"center", padding:"12px 0", gap:8, borderBottom:i < transfers.length - 1 ? "1px solid " + CL.border : "none"}}>
                         <div style={{flex:1, textAlign:"right"}}>
-                          <div style={{fontSize:15, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{t.from.emoji + " " + t.from.name.split(" ")[0]}</div>
+                          <div style={{fontSize:16, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{t.from.emoji + " " + t.from.name.split(" ")[0]}</div>
                         </div>
                         <div style={{display:"flex", flexDirection:"column", alignItems:"center", minWidth:80}}>
                           <div style={{fontSize:18, fontWeight:700, color:CL.red, fontFamily:"system-ui"}}>{"$" + t.amount}</div>
                           <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>→ pays →</div>
                         </div>
                         <div style={{flex:1}}>
-                          <div style={{fontSize:15, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{t.to.emoji + " " + t.to.name.split(" ")[0]}</div>
+                          <div style={{fontSize:16, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{t.to.emoji + " " + t.to.name.split(" ")[0]}</div>
                         </div>
                       </div>
                     );
@@ -2144,7 +2148,7 @@ function BetsTab(props) {
               return (
                 <div key={p.id} style={Object.assign({padding:"12px 0"}, S.separator)}>
                   <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8}}>
-                    <div style={{fontSize:15, fontWeight:600, color:"#fff"}}>{p.emoji+" "+p.name}</div>
+                    <div style={{fontSize:16, fontWeight:600, color:"#fff"}}>{p.emoji+" "+p.name}</div>
                     <div style={{fontSize:16, fontWeight:700, color:totalDrinks(p.id)>0?CL.red:CL.muted, fontFamily:"system-ui"}}>{totalDrinks(p.id)}</div>
                   </div>
                   <div style={{display:"flex", gap:6}}>
@@ -2170,7 +2174,7 @@ function BetsTab(props) {
               return (
                 <div key={p.id} style={Object.assign({display:"flex", alignItems:"center", padding:"8px 0", gap:10}, S.separator)}>
                   <div style={{fontSize:16, width:24, textAlign:"center"}}>{i===0?"👑":i+1}</div>
-                  <div style={{flex:1}}><div style={{fontSize:15, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{p.emoji+" "+p.name}</div><div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>{(pd.pints?pd.pints+"🍺 ":"")+(pd.whiskey?pd.whiskey+"🥃 ":"")+(pd.wine?pd.wine+"🍷 ":"")+(pd.other?pd.other+"🍹":"")}</div></div>
+                  <div style={{flex:1}}><div style={{fontSize:16, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{p.emoji+" "+p.name}</div><div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>{(pd.pints?pd.pints+"🍺 ":"")+(pd.whiskey?pd.whiskey+"🥃 ":"")+(pd.wine?pd.wine+"🍷 ":"")+(pd.other?pd.other+"🍹":"")}</div></div>
                   <div style={{fontSize:18, fontWeight:700, color:p.total>0?CL.red:CL.muted, fontFamily:"system-ui"}}>{p.total}</div>
                 </div>
               );
@@ -2266,7 +2270,7 @@ function ChatTab(props) {
 
       {tripDay.status === "active" && (
         <div style={Object.assign({}, S.card, {background:"rgba(220,38,38,0.08)", borderColor:"rgba(220,38,38,0.2)"})}>
-          <div style={{fontSize:13, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{"📍 Day " + tripDay.day + " of 8"}</div>
+          <div style={{fontSize:14, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{"📍 Day " + tripDay.day + " of 8"}</div>
           <div style={S.label}>{ITINERARY[tripDay.day] ? ITINERARY[tripDay.day].title : "Trip day"}</div>
         </div>
       )}
