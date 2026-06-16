@@ -159,6 +159,16 @@ const DRINK_TYPES = [
 
 const EMOJIS = ["🔴","🔵","⚪","🟡","🟢","🟣","🟠","🟤"];
 
+const EXPENSE_CATEGORIES = [
+  { id:"meals", emoji:"🍽️", label:"Meals" },
+  { id:"drinks", emoji:"🍺", label:"Drinks" },
+  { id:"transport", emoji:"🚐", label:"Transport" },
+  { id:"activities", emoji:"🎯", label:"Activities" },
+  { id:"lodging", emoji:"🏨", label:"Lodging" },
+  { id:"golf", emoji:"⛳", label:"Golf" },
+  { id:"other", emoji:"💰", label:"Other" },
+];
+
 // ─── UTILITIES ───────────────────────────────────────────────────────
 function initScores(players) {
   var s = {};
@@ -180,6 +190,7 @@ function defaultState() {
     h2hBets: [],
     teamMatches: [],
     drinks: {},
+    expenses: [],
     weatherCache: null,
   };
 }
@@ -292,7 +303,7 @@ function getTripDay() {
   return { status:"active", day:Math.min(diff, 8) };
 }
 
-function calculateSettleUp(players, games, bets, h2hBets, teamMatches, individualProps) {
+function calculateSettleUp(players, games, bets, h2hBets, teamMatches, individualProps, expenses) {
   var balances = {};
   players.forEach(function(p) { balances[p.id] = 0; });
 
@@ -366,6 +377,18 @@ function calculateSettleUp(players, games, bets, h2hBets, teamMatches, individua
     });
   }
 
+  // Trip expenses (split costs)
+  if (expenses) {
+    expenses.forEach(function(exp) {
+      if (!exp.payer || !exp.splitAmong || exp.splitAmong.length === 0) return;
+      var perPerson = exp.amount / exp.splitAmong.length;
+      balances[exp.payer] = (balances[exp.payer] || 0) + exp.amount - perPerson;
+      exp.splitAmong.forEach(function(pid) {
+        if (pid !== exp.payer) balances[pid] = (balances[pid] || 0) - perPerson;
+      });
+    });
+  }
+
   var creditors = [];
   var debtors = [];
   players.forEach(function(p) {
@@ -429,8 +452,8 @@ var S = {
   scoreBtn:   { padding:14, borderRadius:8, border:"1px solid "+CL.border, background:"rgba(30,58,95,0.3)", color:"#fff", fontSize:18, fontWeight:700, cursor:"pointer" },
   scoreBtnOn: { background:CL.red, color:"#fff", borderColor:CL.red },
   nav:        { position:"fixed", bottom:0, left:"50%", transform:"translateX(-50%)", width:"100%", maxWidth:480, background:"rgba(17,29,53,0.95)", borderTop:"1px solid "+CL.border, display:"flex", justifyContent:"space-around", padding:"6px 0 env(safe-area-inset-bottom, 8px)", backdropFilter:"blur(12px)", zIndex:50 },
-  navBtn:     { background:"none", border:"none", cursor:"pointer", display:"flex", flexDirection:"column", alignItems:"center", gap:2, padding:"6px 8px", minWidth:48 },
-  navLabel:   { fontSize:11, color:CL.muted, fontFamily:"system-ui", fontWeight:600 },
+  navBtn:     { background:"none", border:"none", cursor:"pointer", display:"flex", flexDirection:"column", alignItems:"center", gap:2, padding:"6px 2px", minWidth:0, flex:1 },
+  navLabel:   { fontSize:10, color:CL.muted, fontFamily:"system-ui", fontWeight:600 },
   // Reusable patterns
   row:        { display:"flex", alignItems:"center", gap:12, padding:"10px 0" },
   separator:  { borderBottom:"1px solid "+CL.border },
@@ -604,6 +627,7 @@ export default function App() {
           h2hBets: fresh.h2hBets,
           teamMatches: fresh.teamMatches,
           drinks: fresh.drinks,
+          expenses: fresh.expenses,
         });
         setState(function(prev) { return Object.assign({}, prev, { initialized:true }); });
       }
@@ -636,7 +660,7 @@ export default function App() {
     setState(function(prev) {
       var next = Object.assign({}, prev, changes);
       // Save to Firebase (debounced to avoid hammering Firestore)
-      if (changes.scores || changes.players || changes.games || changes.bets || changes.individualProps || changes.h2hBets || changes.teamMatches || changes.drinks) {
+      if (changes.scores || changes.players || changes.games || changes.bets || changes.individualProps || changes.h2hBets || changes.teamMatches || changes.drinks || changes.expenses) {
         clearTimeout(saveTimer.current);
         saveTimer.current = setTimeout(function() {
           firebaseSave({
@@ -648,6 +672,7 @@ export default function App() {
             h2hBets: next.h2hBets,
             teamMatches: next.teamMatches,
             drinks: next.drinks,
+            expenses: next.expenses,
           });
         }, 500);
       }
@@ -668,6 +693,7 @@ export default function App() {
       h2hBets: fresh.h2hBets,
       teamMatches: fresh.teamMatches,
       drinks: fresh.drinks,
+      expenses: fresh.expenses,
     });
   };
 
@@ -695,6 +721,7 @@ export default function App() {
     { id:"scores", icon:"📝", label:"Scores" },
     { id:"leaderboard", icon:"🏆", label:"Board" },
     { id:"bets", icon:"💰", label:"Bets" },
+    { id:"expenses", icon:"💳", label:"Spend" },
     { id:"chat", icon:"💬", label:"Chat" },
   ];
 
@@ -712,7 +739,8 @@ export default function App() {
         {activeTab === "itinerary" && <ItineraryTab weatherCache={state.weatherCache} update={update} />}
         {activeTab === "scores" && <ScoresTab players={players} scores={scores} sel={selectedRound} hole={scoringHole} setHole={setScoringHole} update={update} rs={rs} currentPlayer={currentPlayer} />}
         {activeTab === "leaderboard" && <LeaderboardTab players={players} scores={scores} lb={lb} rs={rs} currentPlayer={currentPlayer} />}
-        {activeTab === "bets" && <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} />}
+        {activeTab === "bets" && <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} />}
+        {activeTab === "expenses" && <ExpensesTab players={players} expenses={state.expenses || []} update={update} />}
         {activeTab === "chat" && <ChatTab currentPlayer={currentPlayer} players={players} />}
       </div>
       <nav style={S.nav}>
@@ -1646,6 +1674,7 @@ function BetsTab(props) {
   var customBets = props.customBets, h2hBets = props.h2hBets || [], drinks = props.drinks || {};
   var teamMatches = props.teamMatches || DEFAULT_TEAM_MATCHES;
   var individualProps = props.individualProps || DEFAULT_INDIVIDUAL_PROPS;
+  var expenses = props.expenses || [];
   var addingGame = props.addingGame, update = props.update, resetAll = props.resetAll;
 
   var ts = useState("props"); var tab = ts[0], setTab = ts[1];
@@ -1708,6 +1737,13 @@ function BetsTab(props) {
       if (!m.settled || !m.winner) return;
       var won = (m.winner === "a" && isTeamA) || (m.winner === "b" && !isTeamA);
       total += won ? m.stake : -m.stake;
+    });
+    // Add expense balances
+    expenses.forEach(function(exp) {
+      if (!exp.payer || !exp.splitAmong || exp.splitAmong.length === 0) return;
+      var perPerson = exp.amount / exp.splitAmong.length;
+      if (pid === exp.payer) total += exp.amount - perPerson;
+      else if (exp.splitAmong.indexOf(pid) >= 0) total -= perPerson;
     });
     return total;
   }
@@ -1923,6 +1959,19 @@ function BetsTab(props) {
                 update({h2hBets:updated});
               }
 
+              function removeSide(pid, side) {
+                var updated = h2hBets.map(function(b) {
+                  if (b.id !== bet.id) return b;
+                  var nb = Object.assign({}, b);
+                  nb.sideA = (nb.sideA || [nb.bettor]).slice();
+                  nb.sideB = (nb.sideB || [nb.opponent]).slice();
+                  if (side === "a") nb.sideA = nb.sideA.filter(function(id) { return id !== pid; });
+                  else nb.sideB = nb.sideB.filter(function(id) { return id !== pid; });
+                  return nb;
+                });
+                update({h2hBets:updated});
+              }
+
               function settleBet(winningSide) {
                 update({h2hBets:h2hBets.map(function(b) {
                   return b.id === bet.id ? Object.assign({}, b, {settled:true, winningSide:winningSide, winner:winningSide === "a" ? bet.bettor : bet.opponent}) : b;
@@ -1932,52 +1981,63 @@ function BetsTab(props) {
               var bettorP = players.find(function(p) { return p.id===bet.bettor; });
               var opponentP = players.find(function(p) { return p.id===bet.opponent; });
 
+              // Render a player row with label and optional remove button
+              function playerRow(pid, isCreator, side, sideColor) {
+                var p = players.find(function(x) { return x.id===pid; });
+                if (!p) return null;
+                return (
+                  <div key={pid} style={{display:"flex", alignItems:"center", justifyContent:"space-between", padding:"3px 0"}}>
+                    <div style={{fontSize:14, color:"#fff", fontFamily:"system-ui"}}>
+                      {p.emoji+" "+p.name}
+                      {isCreator && <span style={{fontSize:10, color:sideColor, marginLeft:6}}>★</span>}
+                      {!isCreator && <span style={{fontSize:10, color:CL.muted, marginLeft:6}}>(joined)</span>}
+                    </div>
+                    {!isCreator && !bet.settled && (
+                      <button onClick={function(e) { e.stopPropagation(); removeSide(pid, side); }} style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:12, padding:"2px 6px"}}>✕</button>
+                    )}
+                  </div>
+                );
+              }
+
               return (
                 <div key={bet.id} style={Object.assign({padding:"12px 0"}, S.separator)}>
                   <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start"}}>
                     <div style={{flex:1}}>
-                      {bet.course && <div style={{display:"inline-block", fontSize:10, fontWeight:700, color:"#22c55e", fontFamily:"system-ui", background:"rgba(34,197,94,0.12)", padding:"2px 8px", borderRadius:10, marginBottom:4}}>{bet.course}</div>}
+                      {bet.course && <div style={{display:"inline-block", fontSize:11, fontWeight:700, color:"#22c55e", fontFamily:"system-ui", background:"rgba(34,197,94,0.12)", padding:"3px 10px", borderRadius:10, marginBottom:4}}>{bet.course}</div>}
                       <div style={{fontSize:15, fontWeight:600, color:bet.settled?CL.muted:"#fff", textDecoration:bet.settled?"line-through":"none"}}>{bet.description}</div>
-                      <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui"}}>{"$"+bet.stake+"/person · $"+totalPot+" pot"}</div>
+                      <div style={{fontSize:13, color:CL.red, fontFamily:"system-ui"}}>{"$"+bet.stake+"/person · $"+totalPot+" pot"}</div>
                     </div>
-                    <button style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:14, flexShrink:0}} onClick={function() { update({h2hBets:h2hBets.filter(function(b) { return b.id!==bet.id; })}); }}>✕</button>
+                    {!bet.settled && <button style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:14, flexShrink:0}} onClick={function() { if (confirm("Delete this bet?")) update({h2hBets:h2hBets.filter(function(b) { return b.id!==bet.id; })}); }}>🗑</button>}
                   </div>
 
-                  {/* Sides display */}
-                  <div style={{display:"flex", gap:8, marginTop:8}}>
+                  {/* Sides display with named players */}
+                  <div style={{display:"flex", gap:8, marginTop:10}}>
                     <div style={Object.assign({}, S.teamBox, bet.settled && winSide==="a" ? S.teamBoxWin : {})}>
-                      <div style={{fontSize:10, color:CL.red, fontFamily:"system-ui", fontWeight:700, marginBottom:4}}>{"SIDE A" + (bettorP ? " · "+bettorP.name.split(" ")[0]+"'s bet" : "")}</div>
-                      {sideA.map(function(pid) {
-                        var p = players.find(function(x) { return x.id===pid; });
-                        return p ? <div key={pid} style={{fontSize:12, color:"#fff", fontFamily:"system-ui", padding:"2px 0"}}>{p.emoji+" "+p.name.split(" ")[0]}</div> : null;
-                      })}
-                      <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui", marginTop:2}}>{sideA.length + " player" + (sideA.length!==1?"s":"")}</div>
+                      <div style={{fontSize:11, color:CL.red, fontFamily:"system-ui", fontWeight:700, marginBottom:6}}>SIDE A</div>
+                      {sideA.map(function(pid) { return playerRow(pid, pid === bet.bettor, "a", CL.red); })}
+                      <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginTop:4}}>{sideA.length + " player" + (sideA.length!==1?"s":"") + " · $" + (sideA.length * bet.stake)}</div>
                     </div>
-                    <div style={{display:"flex", alignItems:"center", color:CL.muted, fontWeight:700, fontFamily:"system-ui", fontSize:12}}>vs</div>
+                    <div style={{display:"flex", alignItems:"center", color:CL.muted, fontWeight:700, fontFamily:"system-ui", fontSize:13}}>vs</div>
                     <div style={Object.assign({}, S.teamBox, bet.settled && winSide==="b" ? S.teamBoxWin : {})}>
-                      <div style={{fontSize:10, color:CL.blue, fontFamily:"system-ui", fontWeight:700, marginBottom:4}}>{"SIDE B" + (opponentP ? " · "+opponentP.name.split(" ")[0]+"'s bet" : "")}</div>
-                      {sideB.map(function(pid) {
-                        var p = players.find(function(x) { return x.id===pid; });
-                        return p ? <div key={pid} style={{fontSize:12, color:"#fff", fontFamily:"system-ui", padding:"2px 0"}}>{p.emoji+" "+p.name.split(" ")[0]}</div> : null;
-                      })}
-                      <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui", marginTop:2}}>{sideB.length + " player" + (sideB.length!==1?"s":"")}</div>
+                      <div style={{fontSize:11, color:CL.blue, fontFamily:"system-ui", fontWeight:700, marginBottom:6}}>SIDE B</div>
+                      {sideB.map(function(pid) { return playerRow(pid, pid === bet.opponent, "b", CL.blue); })}
+                      <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginTop:4}}>{sideB.length + " player" + (sideB.length!==1?"s":"") + " · $" + (sideB.length * bet.stake)}</div>
                     </div>
                   </div>
 
-                  {/* Join buttons for others */}
+                  {/* Jump In — clear per-player buttons */}
                   {!bet.settled && canJoin.length > 0 && (
-                    <div style={{marginTop:8, padding:8, background:"rgba(30,58,95,0.15)", borderRadius:6}}>
-                      <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui", fontWeight:600, marginBottom:6}}>JUMP IN — ${ bet.stake} to play</div>
-                      <div style={{display:"flex", gap:4, flexWrap:"wrap"}}>
-                        {canJoin.map(function(p) {
-                          return (
-                            <div key={p.id} style={{display:"flex", gap:2}}>
-                              <button onClick={function() { joinSide(p.id, "a"); }} style={Object.assign({}, S.pillBtn, {fontSize:10, borderColor:"rgba(220,38,38,0.4)"})}>{p.emoji+" → A"}</button>
-                              <button onClick={function() { joinSide(p.id, "b"); }} style={Object.assign({}, S.pillBtn, {fontSize:10, borderColor:"rgba(37,99,235,0.4)"})}>{p.emoji+" → B"}</button>
-                            </div>
-                          );
-                        })}
-                      </div>
+                    <div style={{marginTop:10, padding:10, background:"rgba(40,69,112,0.15)", borderRadius:8}}>
+                      <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", fontWeight:600, marginBottom:8}}>{"ADD PLAYER — $"+bet.stake+" to join"}</div>
+                      {canJoin.map(function(p) {
+                        return (
+                          <div key={p.id} style={{display:"flex", alignItems:"center", gap:6, marginBottom:6}}>
+                            <div style={{flex:1, fontSize:14, color:"#fff", fontFamily:"system-ui"}}>{p.emoji+" "+p.name}</div>
+                            <button onClick={function() { joinSide(p.id, "a"); }} style={Object.assign({}, S.pillBtn, {fontSize:12, padding:"5px 12px", borderColor:"rgba(240,69,74,0.5)", color:CL.red})}>→ Side A</button>
+                            <button onClick={function() { joinSide(p.id, "b"); }} style={Object.assign({}, S.pillBtn, {fontSize:12, padding:"5px 12px", borderColor:"rgba(111,172,255,0.5)", color:CL.blue})}>→ Side B</button>
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
 
@@ -2090,7 +2150,7 @@ function BetsTab(props) {
             <div style={S.cardTitle}>💸 Settle Up</div>
             <div style={Object.assign({}, S.label, {marginBottom:12})}>Who owes who based on all side games</div>
             {(function() {
-              var transfers = calculateSettleUp(players, games, bets, h2hBets, teamMatches, individualProps);
+              var transfers = calculateSettleUp(players, games, bets, h2hBets, teamMatches, individualProps, expenses);
               if (transfers.length === 0) return (
                 <div style={{textAlign:"center", padding:20, color:CL.muted, fontFamily:"system-ui", fontSize:14}}>
                   {games.length === 0 && h2hBets.filter(function(b){return b.settled;}).length === 0 && bets.filter(function(b){return b.settled;}).length === 0 ? "No bets or games settled yet." : "Everyone is settled up!"}
@@ -2217,6 +2277,190 @@ function BetsTab(props) {
 }
 
 // ─── CHAT ────────────────────────────────────────────────────────────
+// ─── EXPENSES TAB ────────────────────────────────────────────────────
+function ExpensesTab(props) {
+  var players = props.players, expenses = props.expenses || [], update = props.update;
+  var expCat = useState(""); var expCategory = expCat[0], setExpCategory = expCat[1];
+  var expDesc = useState(""); var expDescription = expDesc[0], setExpDescription = expDesc[1];
+  var expAmt = useState(""); var expAmount = expAmt[0], setExpAmount = expAmt[1];
+  var expPayer = useState(null); var payer = expPayer[0], setPayer = expPayer[1];
+  var expSplit = useState(players.map(function(p) { return p.id; })); var splitAmong = expSplit[0], setSplitAmong = expSplit[1];
+  var expAdding = useState(false); var adding = expAdding[0], setAdding = expAdding[1];
+
+  function getExpenseBalances() {
+    var bal = {};
+    players.forEach(function(p) { bal[p.id] = 0; });
+    expenses.forEach(function(exp) {
+      if (!exp.payer || !exp.splitAmong || exp.splitAmong.length === 0) return;
+      var perPerson = exp.amount / exp.splitAmong.length;
+      bal[exp.payer] = (bal[exp.payer] || 0) + exp.amount - perPerson;
+      exp.splitAmong.forEach(function(pid) {
+        if (pid !== exp.payer) bal[pid] = (bal[pid] || 0) - perPerson;
+      });
+    });
+    return bal;
+  }
+
+  var balances = getExpenseBalances();
+  var totalSpent = expenses.reduce(function(t, e) { return t + (e.amount || 0); }, 0);
+
+  function toggleSplit(pid) {
+    if (splitAmong.indexOf(pid) >= 0) setSplitAmong(splitAmong.filter(function(id) { return id !== pid; }));
+    else setSplitAmong(splitAmong.concat([pid]));
+  }
+
+  function addExpense() {
+    if (!payer || !expAmount || splitAmong.length === 0) return;
+    var payerP = players.find(function(p) { return p.id === payer; });
+    var newExp = {
+      id: "exp" + Date.now(),
+      description: expDescription.trim() || "Expense",
+      amount: parseFloat(expAmount),
+      payer: payer,
+      payerName: payerP ? payerP.name : "",
+      category: expCategory || "other",
+      splitAmong: splitAmong.slice(),
+      ts: new Date().toISOString(),
+    };
+    update({ expenses: expenses.concat([newExp]) });
+    setExpDescription(""); setExpAmount(""); setPayer(null); setExpCategory("");
+    setSplitAmong(players.map(function(p) { return p.id; }));
+    setAdding(false);
+  }
+
+  var catMap = {};
+  EXPENSE_CATEGORIES.forEach(function(c) { catMap[c.id] = c; });
+
+  return (
+    <div>
+      <div style={S.pageHeader}>
+        <div style={S.pageTitle}>Trip Expenses</div>
+        <button onClick={function() { setAdding(!adding); }} style={Object.assign({}, S.addBtn, {fontSize:14})}>{adding ? "Cancel" : "+ Add"}</button>
+      </div>
+
+      {/* Summary card */}
+      <div style={S.card}>
+        <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12}}>
+          <div>
+            <div style={{fontSize:28, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{"$"+totalSpent.toFixed(2)}</div>
+            <div style={S.label}>{expenses.length+" expense"+(expenses.length!==1?"s":"")+" total"}</div>
+          </div>
+        </div>
+
+        {/* Per-person balances */}
+        {expenses.length > 0 && (
+          <div>
+            <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", fontWeight:600, marginBottom:6}}>WHO OWES WHAT</div>
+            {players.map(function(p) {
+              var bal = balances[p.id] || 0;
+              var color = bal > 0.01 ? "#22c55e" : bal < -0.01 ? CL.red : CL.muted;
+              var label = bal > 0.01 ? "is owed" : bal < -0.01 ? "owes" : "even";
+              return (
+                <div key={p.id} style={Object.assign({display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 0"}, S.separator)}>
+                  <div>
+                    <div style={{fontSize:15, color:"#fff", fontFamily:"system-ui"}}>{p.emoji+" "+p.name}</div>
+                    <div style={{fontSize:12, color:color, fontFamily:"system-ui"}}>{label}</div>
+                  </div>
+                  <div style={{fontSize:16, fontWeight:700, color:color, fontFamily:"system-ui"}}>{(bal >= 0 ? "+$" : "-$")+Math.abs(bal).toFixed(2)}</div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {expenses.length === 0 && !adding && (
+          <div style={{textAlign:"center", padding:20}}>
+            <div style={{fontSize:36, marginBottom:8}}>💳</div>
+            <div style={{fontSize:14, color:CL.muted, fontFamily:"system-ui"}}>No expenses yet. Tap + Add to log the first one.</div>
+          </div>
+        )}
+      </div>
+
+      {/* Add expense form */}
+      {adding && (
+        <div style={S.card}>
+          <div style={S.cardTitle}>+ New Expense</div>
+
+          <div style={Object.assign({}, S.label, {marginBottom:6})}>What was it for?</div>
+          <input style={S.input} value={expDescription} onChange={function(e) { setExpDescription(e.target.value); }} placeholder="e.g. Dinner at Bushmills Inn"/>
+
+          <div style={Object.assign({}, S.label, {marginBottom:6})}>Category</div>
+          <div style={{display:"flex", gap:4, flexWrap:"wrap", marginBottom:10}}>
+            {EXPENSE_CATEGORIES.map(function(cat) {
+              var sel = expCategory === cat.id;
+              return <button key={cat.id} onClick={function() { setExpCategory(sel ? "" : cat.id); }} style={Object.assign({}, S.pillBtn, sel ? {background:"rgba(34,197,94,0.2)", borderColor:"#22c55e", color:"#22c55e"} : {})}>{cat.emoji+" "+cat.label}</button>;
+            })}
+          </div>
+
+          <div style={Object.assign({}, S.label, {marginBottom:6})}>Amount ($)</div>
+          <input style={Object.assign({}, S.input, {width:140})} value={expAmount} onChange={function(e) { setExpAmount(e.target.value); }} placeholder="$ total amount" type="number"/>
+
+          <div style={Object.assign({}, S.label, {marginBottom:6})}>Who paid?</div>
+          <div style={{display:"flex", gap:4, flexWrap:"wrap", marginBottom:10}}>
+            {players.map(function(p) {
+              var sel = payer === p.id;
+              return <button key={p.id} onClick={function() { setPayer(p.id); }} style={Object.assign({}, S.pillBtn, sel ? {background:"rgba(240,69,74,0.2)", borderColor:CL.red, color:CL.red} : {})}>{p.emoji+" "+p.name.split(" ")[0]}</button>;
+            })}
+          </div>
+
+          <div style={Object.assign({}, S.label, {marginBottom:6})}>Split among ({splitAmong.length+" of "+players.length})</div>
+          <div style={{display:"flex", gap:4, flexWrap:"wrap", marginBottom:6}}>
+            {players.map(function(p) {
+              var included = splitAmong.indexOf(p.id) >= 0;
+              return <button key={p.id} onClick={function() { toggleSplit(p.id); }} style={Object.assign({}, S.pillBtn, included ? {background:"rgba(111,172,255,0.2)", borderColor:CL.blue, color:CL.blue} : {opacity:0.5})}>{p.emoji+" "+p.name.split(" ")[0]}</button>;
+            })}
+          </div>
+          <div style={{display:"flex", gap:8, marginBottom:10}}>
+            <button onClick={function() { setSplitAmong(players.map(function(p) { return p.id; })); }} style={Object.assign({}, S.pillBtn, {fontSize:12})}>All 8</button>
+            <button onClick={function() { setSplitAmong([]); }} style={Object.assign({}, S.pillBtn, {fontSize:12})}>None</button>
+          </div>
+
+          {splitAmong.length > 0 && expAmount && (
+            <div style={{fontSize:14, color:CL.blue, fontFamily:"system-ui", fontWeight:600, marginBottom:12}}>{"= $"+(parseFloat(expAmount)/splitAmong.length).toFixed(2)+" per person"}</div>
+          )}
+
+          <button style={Object.assign({}, S.primaryBtn, {opacity:!payer || !expAmount || splitAmong.length === 0 ? 0.5 : 1})} onClick={addExpense}>Add Expense</button>
+        </div>
+      )}
+
+      {/* Expense list */}
+      {expenses.length > 0 && (
+        <div style={S.card}>
+          <div style={S.cardTitle}>📋 All Expenses</div>
+          {expenses.slice().reverse().map(function(exp) {
+            var payerP = players.find(function(p) { return p.id === exp.payer; });
+            var cat = catMap[exp.category] || catMap.other;
+            var perPerson = exp.splitAmong ? (exp.amount / exp.splitAmong.length) : exp.amount;
+            return (
+              <div key={exp.id} style={Object.assign({padding:"10px 0"}, S.separator)}>
+                <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start"}}>
+                  <div style={{display:"flex", gap:10, flex:1}}>
+                    <div style={{fontSize:22, flexShrink:0}}>{cat.emoji}</div>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:15, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{exp.description}</div>
+                      <div style={S.label}>{(payerP ? payerP.emoji+" "+payerP.name.split(" ")[0]+" paid" : "Paid")+" · split "+exp.splitAmong.length+" ways · $"+perPerson.toFixed(2)+"/ea"}</div>
+                      <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", marginTop:2}}>
+                        {exp.splitAmong.map(function(pid) {
+                          var sp = players.find(function(x) { return x.id===pid; });
+                          return sp ? sp.name.split(" ")[0] : "";
+                        }).join(", ")}
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{textAlign:"right", flexShrink:0}}>
+                    <div style={{fontSize:17, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{"$"+exp.amount.toFixed(2)}</div>
+                    <button onClick={function() { if (confirm("Delete this expense?")) update({expenses:expenses.filter(function(e) { return e.id!==exp.id; })}); }} style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:12, marginTop:2}}>✕ delete</button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ChatTab(props) {
   var currentPlayer = props.currentPlayer;
   var players = props.players;
