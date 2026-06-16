@@ -1,0 +1,7 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body, #root { height: 100%; background: #0a1225; }
+body { font-family: Georgia, 'Times New Roman', serif; color: #cbd5e8; -webkit-font-smoothing: antialiased; }
+input, select, button { font-family: inherit; outline: none; }
+input, select { -webkit-appearance: none; appearance: none; }
+button { -webkit-tap-highlight-color: transparent; }
+a { -webkit-tap-highlight-color: transparent; }
