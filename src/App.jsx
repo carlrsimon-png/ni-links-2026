@@ -104,6 +104,17 @@ const DEFAULT_PROPS = [
   { id:"b7", name:"WASPs vs Italians — Most Rounds Won", settled:false, winner:null, buyin:10 },
 ];
 
+// Individual prop bets — winner takes the pot ($10/player buy-in)
+const DEFAULT_INDIVIDUAL_PROPS = [
+  { id:"ip1", name:"Lowest Net Score (Trip)", desc:"Best net total across all 5 rounds", settled:false, winner:null, buyin:10 },
+  { id:"ip2", name:"Highest Net Score (Trip)", desc:"Worst net total — the wooden spoon", settled:false, winner:null, buyin:10 },
+  { id:"ip3", name:"Most Triple Bogeys or Worse", desc:"Most holes at triple bogey (+3) or higher", settled:false, winner:null, buyin:10 },
+  { id:"ip4", name:"Most Pars or Better (Trip)", desc:"Most holes played at par or under", settled:false, winner:null, buyin:10 },
+  { id:"ip5", name:"Closest to the Pin — RCD par 3s", desc:"Best on a designated Royal County Down par 3", settled:false, winner:null, buyin:10 },
+  { id:"ip6", name:"Longest Drive — Portrush", desc:"Longest drive in the fairway at Royal Portrush", settled:false, winner:null, buyin:10 },
+  { id:"ip7", name:"Best Single Round (Net)", desc:"Lowest net score in any one round", settled:false, winner:null, buyin:10 },
+];
+
 const DEFAULT_TEAM_MATCHES = [
   { id:"m1", course:"Ardglass", courseIdx:0, teamA:null, teamB:null, settled:false, winner:null, stake:20 },
   { id:"m2", course:"Royal County Down", courseIdx:1, teamA:null, teamB:null, settled:false, winner:null, stake:20 },
@@ -164,6 +175,7 @@ function defaultState() {
     scores: initScores(DEFAULT_PLAYERS),
     games: [],
     bets: DEFAULT_PROPS,
+    individualProps: DEFAULT_INDIVIDUAL_PROPS,
     customBets: [],
     h2hBets: [],
     teamMatches: [],
@@ -280,7 +292,7 @@ function getTripDay() {
   return { status:"active", day:Math.min(diff, 8) };
 }
 
-function calculateSettleUp(players, games, bets, h2hBets, teamMatches) {
+function calculateSettleUp(players, games, bets, h2hBets, teamMatches, individualProps) {
   var balances = {};
   players.forEach(function(p) { balances[p.id] = 0; });
 
@@ -338,6 +350,18 @@ function calculateSettleUp(players, games, bets, h2hBets, teamMatches) {
       var loseIds = m.winner === "a" ? bIds : aIds;
       loseIds.forEach(function(pid) { balances[pid] = (balances[pid] || 0) - m.stake; });
       winIds.forEach(function(pid) { balances[pid] = (balances[pid] || 0) + m.stake; });
+    });
+  }
+
+  // Individual prop bets (single winner takes pot, all buy in)
+  if (individualProps) {
+    individualProps.forEach(function(prop) {
+      if (!prop.settled || !prop.winner) return;
+      var buyin = prop.buyin || 10;
+      players.forEach(function(p) {
+        if (p.id === prop.winner) balances[p.id] = (balances[p.id] || 0) + (buyin * (players.length - 1));
+        else balances[p.id] = (balances[p.id] || 0) - buyin;
+      });
     });
   }
 
@@ -573,6 +597,7 @@ export default function App() {
           scores: fresh.scores,
           games: fresh.games,
           bets: fresh.bets,
+          individualProps: fresh.individualProps,
           h2hBets: fresh.h2hBets,
           teamMatches: fresh.teamMatches,
           drinks: fresh.drinks,
@@ -608,7 +633,7 @@ export default function App() {
     setState(function(prev) {
       var next = Object.assign({}, prev, changes);
       // Save to Firebase (debounced to avoid hammering Firestore)
-      if (changes.scores || changes.players || changes.games || changes.bets || changes.h2hBets || changes.teamMatches || changes.drinks) {
+      if (changes.scores || changes.players || changes.games || changes.bets || changes.individualProps || changes.h2hBets || changes.teamMatches || changes.drinks) {
         clearTimeout(saveTimer.current);
         saveTimer.current = setTimeout(function() {
           firebaseSave({
@@ -616,6 +641,7 @@ export default function App() {
             scores: next.scores,
             games: next.games,
             bets: next.bets,
+            individualProps: next.individualProps,
             h2hBets: next.h2hBets,
             teamMatches: next.teamMatches,
             drinks: next.drinks,
@@ -635,6 +661,7 @@ export default function App() {
       scores: fresh.scores,
       games: fresh.games,
       bets: fresh.bets,
+      individualProps: fresh.individualProps,
       h2hBets: fresh.h2hBets,
       teamMatches: fresh.teamMatches,
       drinks: fresh.drinks,
@@ -682,7 +709,7 @@ export default function App() {
         {activeTab === "itinerary" && <ItineraryTab weatherCache={state.weatherCache} update={update} />}
         {activeTab === "scores" && <ScoresTab players={players} scores={scores} sel={selectedRound} hole={scoringHole} setHole={setScoringHole} update={update} rs={rs} currentPlayer={currentPlayer} />}
         {activeTab === "leaderboard" && <LeaderboardTab players={players} scores={scores} lb={lb} rs={rs} currentPlayer={currentPlayer} />}
-        {activeTab === "bets" && <BetsTab players={players} scores={scores} games={games} bets={bets} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} />}
+        {activeTab === "bets" && <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} />}
         {activeTab === "chat" && <ChatTab currentPlayer={currentPlayer} players={players} />}
       </div>
       <nav style={S.nav}>
@@ -1589,6 +1616,7 @@ function BetsTab(props) {
   var players = props.players, games = props.games, bets = props.bets;
   var customBets = props.customBets, h2hBets = props.h2hBets || [], drinks = props.drinks || {};
   var teamMatches = props.teamMatches || DEFAULT_TEAM_MATCHES;
+  var individualProps = props.individualProps || DEFAULT_INDIVIDUAL_PROPS;
   var addingGame = props.addingGame, update = props.update, resetAll = props.resetAll;
 
   var ts = useState("props"); var tab = ts[0], setTab = ts[1];
@@ -1601,6 +1629,7 @@ function BetsTab(props) {
   var h2hStake = useState(""); var h2hAmt = h2hStake[0], setH2hAmt = h2hStake[1];
   var h2hP1 = useState(null); var bettor = h2hP1[0], setBettor = h2hP1[1];
   var h2hP2 = useState(null); var opponent = h2hP2[0], setOpponent = h2hP2[1];
+  var h2hCrs = useState(""); var h2hCourse = h2hCrs[0], setH2hCourse = h2hCrs[1];
   // Player management
   var pns = useState(""); var pName = pns[0], setPName = pns[1];
   var phs = useState(""); var pHcp = phs[0], setPHcp = phs[1];
@@ -1614,6 +1643,13 @@ function BetsTab(props) {
       if (!b.settled || !b.winner || !b.buyin) return;
       if (pid === b.winner) total += b.buyin * (players.length - 1);
       else total -= b.buyin;
+    });
+    // Add individual prop bet winnings
+    individualProps.forEach(function(prop) {
+      if (!prop.settled || !prop.winner) return;
+      var buyin = prop.buyin || 10;
+      if (pid === prop.winner) total += buyin * (players.length - 1);
+      else total -= buyin;
     });
     // Add h2h bet winnings (with sides)
     h2hBets.forEach(function(b) {
@@ -1676,7 +1712,7 @@ function BetsTab(props) {
     setPName(""); setPHcp(""); setPEmoji("🔴"); setEditId(null);
   }
 
-  var subTabs = [{id:"props",label:"🎯 Props"},{id:"match",label:"⚔️ Teams"},{id:"h2h",label:"H2H"},{id:"games",label:"Games"},{id:"settle",label:"💸 Settle"},{id:"drinks",label:"🍺"},{id:"players",label:"👥"}];
+  var subTabs = [{id:"props",label:"🎯 Props"},{id:"match",label:"⚔️ Teams"},{id:"h2h",label:"🤝 H2H"},{id:"games",label:"Games"},{id:"settle",label:"💸 Settle"},{id:"drinks",label:"🍺"},{id:"players",label:"👥"}];
 
   return (
     <div>
@@ -1719,6 +1755,37 @@ function BetsTab(props) {
                       <button onClick={function() { update({bets:bets.map(function(b) { return b.id===bet.id ? Object.assign({},b,{settled:true,winner:"teamB"}) : b; })}); }} style={Object.assign({}, S.pillBtn, {flex:1, textAlign:"center", padding:"8px 0", borderColor:"rgba(37,99,235,0.4)"})}>
                         {matchup.teamB.emoji + " " + matchup.teamB.name}
                       </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Individual Prop Bets */}
+          <div style={S.card}>
+            <div style={S.cardTitle}>🏆 Individual Props</div>
+            <div style={Object.assign({}, S.label, {marginBottom:12})}>$10/player buy-in · Winner takes the pot. Tap the winner to settle.</div>
+            {individualProps.map(function(prop) {
+              var winner = players.find(function(x) { return x.id === prop.winner; });
+              var pot = (prop.buyin || 10) * players.length;
+              return (
+                <div key={prop.id} style={Object.assign({padding:"12px 0"}, S.separator)}>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:14, fontWeight:600, color:prop.settled?CL.muted:"#fff", textDecoration:prop.settled?"line-through":"none"}}>{prop.name}</div>
+                    {prop.desc && <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", marginTop:2}}>{prop.desc}</div>}
+                    <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginTop:2}}>{"$"+(prop.buyin||10)+"/player · $"+pot+" pot"}</div>
+                  </div>
+                  {prop.settled ? (
+                    <div style={{marginTop:6}}>
+                      <div style={{fontSize:13, color:"#22c55e", fontFamily:"system-ui"}}>{"🏆 "+(winner ? winner.emoji+" "+winner.name+" wins $"+(pot-(prop.buyin||10)) : "Winner")}</div>
+                      <button onClick={function() { update({individualProps:individualProps.map(function(x) { return x.id===prop.id ? Object.assign({},x,{settled:false,winner:null}) : x; })}); }} style={{marginTop:6, fontSize:11, color:CL.muted, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:6, padding:"5px 12px", cursor:"pointer"}}>↩ Undo</button>
+                    </div>
+                  ) : (
+                    <div style={{display:"flex", gap:4, marginTop:8, flexWrap:"wrap"}}>
+                      {players.map(function(p) {
+                        return <button key={p.id} onClick={function() { update({individualProps:individualProps.map(function(x) { return x.id===prop.id ? Object.assign({},x,{settled:true,winner:p.id}) : x; })}); }} style={S.pillBtn}>{p.emoji+" "+p.name.split(" ")[0]}</button>;
+                      })}
                     </div>
                   )}
                 </div>
@@ -1797,7 +1864,7 @@ function BetsTab(props) {
         <div>
           <div style={S.card}>
             <div style={S.cardTitle}>⚔️ Head-to-Head Bets</div>
-            <div style={Object.assign({}, S.label, {marginBottom:12})}>Pick sides. Everyone stakes the same amount. Losers pay winners.</div>
+            <div style={Object.assign({}, S.label, {marginBottom:12})}>Pick sides. Anyone can Jump In on either side — 2, 4, or more players. Losers pay winners, split evenly.</div>
 
             {h2hBets.map(function(bet) {
               var sideA = bet.sideA || [bet.bettor];
@@ -1833,6 +1900,7 @@ function BetsTab(props) {
                 <div key={bet.id} style={Object.assign({padding:"12px 0"}, S.separator)}>
                   <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start"}}>
                     <div style={{flex:1}}>
+                      {bet.course && <div style={{display:"inline-block", fontSize:10, fontWeight:700, color:"#22c55e", fontFamily:"system-ui", background:"rgba(34,197,94,0.12)", padding:"2px 8px", borderRadius:10, marginBottom:4}}>{bet.course}</div>}
                       <div style={{fontSize:14, fontWeight:600, color:bet.settled?CL.muted:"#fff", textDecoration:bet.settled?"line-through":"none"}}>{bet.description}</div>
                       <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui"}}>{"$"+bet.stake+"/person · $"+totalPot+" pot"}</div>
                     </div>
@@ -1879,8 +1947,11 @@ function BetsTab(props) {
 
                   {/* Settle buttons */}
                   {bet.settled ? (
-                    <div style={{fontSize:12, color:"#22c55e", fontFamily:"system-ui", marginTop:6}}>
-                      {"🏆 Side "+(winSide==="a"?"A":"B")+" wins! Each winner gets $"+Math.round(bet.stake * (winSide==="a"?sideB:sideA).length / (winSide==="a"?sideA:sideB).length)}
+                    <div style={{marginTop:6}}>
+                      <div style={{fontSize:13, color:"#22c55e", fontFamily:"system-ui"}}>
+                        {"🏆 Side "+(winSide==="a"?"A":"B")+" wins! Each winner gets $"+Math.round(bet.stake * (winSide==="a"?sideB:sideA).length / (winSide==="a"?sideA:sideB).length)}
+                      </div>
+                      <button onClick={function() { update({h2hBets:h2hBets.map(function(b) { return b.id===bet.id ? Object.assign({}, b, {settled:false, winningSide:null, winner:null}) : b; })}); }} style={{marginTop:6, fontSize:11, color:CL.muted, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:6, padding:"5px 12px", cursor:"pointer"}}>↩ Undo — reopen bet</button>
                     </div>
                   ) : (
                     <div style={{display:"flex", gap:6, marginTop:8}}>
@@ -1896,27 +1967,46 @@ function BetsTab(props) {
           </div>
 
           <div style={S.card}>
-            <div style={S.cardTitle}>+ New Bet</div>
-            <input style={S.input} value={h2hText} onChange={function(e) { setH2hText(e.target.value); }} placeholder="What's the bet? (e.g. Carl breaks 85)"/>
-            <input style={Object.assign({}, S.input, {width:100})} value={h2hAmt} onChange={function(e) { setH2hAmt(e.target.value); }} placeholder="Stake $/person" type="number"/>
-            <div style={Object.assign({}, S.label, {marginBottom:6, marginTop:4})}>Side A — Who's betting?</div>
+            <div style={S.cardTitle}>+ New Head-to-Head Bet</div>
+
+            <div style={Object.assign({}, S.label, {marginBottom:6})}>Course / Round</div>
+            <div style={{display:"flex", gap:4, flexWrap:"wrap", marginBottom:10}}>
+              {COURSES.map(function(c, i) {
+                var sel = h2hCourse === c.name;
+                return <button key={i} onClick={function() { setH2hCourse(sel ? "" : c.name); }} style={Object.assign({}, S.pillBtn, sel ? {background:"rgba(34,197,94,0.2)", borderColor:"#22c55e", color:"#22c55e"} : {})}>{COURSE_LABELS[i]}</button>;
+              })}
+              <button onClick={function() { setH2hCourse(h2hCourse==="Whole Trip" ? "" : "Whole Trip"); }} style={Object.assign({}, S.pillBtn, h2hCourse==="Whole Trip" ? {background:"rgba(34,197,94,0.2)", borderColor:"#22c55e", color:"#22c55e"} : {})}>Trip</button>
+            </div>
+
+            <div style={Object.assign({}, S.label, {marginBottom:6})}>Player 1</div>
             <div style={{display:"flex", gap:4, flexWrap:"wrap", marginBottom:8}}>
               {players.map(function(p) {
                 var sel = bettor === p.id;
                 return <button key={p.id} onClick={function() { setBettor(p.id); }} style={Object.assign({}, S.pillBtn, sel ? {background:"rgba(220,38,38,0.2)", borderColor:CL.red, color:CL.red} : {})}>{p.emoji+" "+p.name.split(" ")[0]}</button>;
               })}
             </div>
-            <div style={Object.assign({}, S.label, {marginBottom:6})}>Side B — Against who?</div>
-            <div style={{display:"flex", gap:4, flexWrap:"wrap", marginBottom:12}}>
+            <div style={Object.assign({}, S.label, {marginBottom:6})}>vs Player 2</div>
+            <div style={{display:"flex", gap:4, flexWrap:"wrap", marginBottom:10}}>
               {players.filter(function(p) { return p.id !== bettor; }).map(function(p) {
                 var sel = opponent === p.id;
                 return <button key={p.id} onClick={function() { setOpponent(p.id); }} style={Object.assign({}, S.pillBtn, sel ? {background:"rgba(37,99,235,0.2)", borderColor:CL.blue, color:CL.blue} : {})}>{p.emoji+" "+p.name.split(" ")[0]}</button>;
               })}
             </div>
-            <button style={Object.assign({}, S.primaryBtn, {opacity:!h2hText.trim() || !h2hAmt || !bettor || !opponent ? 0.5 : 1})} onClick={function() {
-              if (!h2hText.trim() || !h2hAmt || !bettor || !opponent) return;
-              update({h2hBets:h2hBets.concat([{id:"h"+Date.now(), description:h2hText.trim(), stake:parseFloat(h2hAmt), bettor:bettor, opponent:opponent, sideA:[bettor], sideB:[opponent], settled:false, winner:null, winningSide:null}])});
-              setH2hText(""); setH2hAmt(""); setBettor(null); setOpponent(null);
+
+            <div style={Object.assign({}, S.label, {marginBottom:6})}>Bet Amount ($ each)</div>
+            <input style={Object.assign({}, S.input, {width:120})} value={h2hAmt} onChange={function(e) { setH2hAmt(e.target.value); }} placeholder="$ amount" type="number"/>
+
+            <div style={Object.assign({}, S.label, {marginBottom:6, marginTop:4})}>Note (optional)</div>
+            <input style={S.input} value={h2hText} onChange={function(e) { setH2hText(e.target.value); }} placeholder="e.g. net, gross, low score..."/>
+
+            <button style={Object.assign({}, S.primaryBtn, {opacity:!h2hAmt || !bettor || !opponent ? 0.5 : 1})} onClick={function() {
+              if (!h2hAmt || !bettor || !opponent) return;
+              var bP = players.find(function(p) { return p.id===bettor; });
+              var oP = players.find(function(p) { return p.id===opponent; });
+              var courseLabel = h2hCourse || "Whole Trip";
+              var autoDesc = (bP ? bP.name.split(" ")[0] : "P1") + " vs " + (oP ? oP.name.split(" ")[0] : "P2") + " · " + courseLabel + (h2hText.trim() ? " ("+h2hText.trim()+")" : "");
+              update({h2hBets:h2hBets.concat([{id:"h"+Date.now(), description:autoDesc, course:courseLabel, note:h2hText.trim(), stake:parseFloat(h2hAmt), bettor:bettor, opponent:opponent, sideA:[bettor], sideB:[opponent], settled:false, winner:null, winningSide:null}])});
+              setH2hText(""); setH2hAmt(""); setBettor(null); setOpponent(null); setH2hCourse("");
             }}>Create Bet</button>
           </div>
         </div>
@@ -1964,7 +2054,7 @@ function BetsTab(props) {
             <div style={S.cardTitle}>💸 Settle Up</div>
             <div style={Object.assign({}, S.label, {marginBottom:12})}>Who owes who based on all side games</div>
             {(function() {
-              var transfers = calculateSettleUp(players, games, bets, h2hBets, teamMatches);
+              var transfers = calculateSettleUp(players, games, bets, h2hBets, teamMatches, individualProps);
               if (transfers.length === 0) return (
                 <div style={{textAlign:"center", padding:20, color:CL.muted, fontFamily:"system-ui", fontSize:14}}>
                   {games.length === 0 && h2hBets.filter(function(b){return b.settled;}).length === 0 && bets.filter(function(b){return b.settled;}).length === 0 ? "No bets or games settled yet." : "Everyone is settled up!"}
