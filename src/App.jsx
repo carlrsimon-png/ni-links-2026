@@ -2347,10 +2347,10 @@ function ExpensesTab(props) {
           </div>
         </div>
 
-        {/* Per-person cost breakdown */}
+        {/* Per-person net amount */}
         {expenses.length > 0 && (
           <div>
-            <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", fontWeight:600, marginBottom:6}}>EACH PERSON'S SHARE</div>
+            <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", fontWeight:600, marginBottom:6}}>NET BALANCE</div>
             {players.map(function(p) {
               var share = 0;
               var paid = 0;
@@ -2359,41 +2359,24 @@ function ExpensesTab(props) {
                 if (exp.splitAmong.indexOf(p.id) >= 0) share += exp.amount / exp.splitAmong.length;
                 if (exp.payer === p.id) paid += exp.amount;
               });
+              var net = paid - share;
+              var color = net > 0.01 ? "#22c55e" : net < -0.01 ? CL.red : CL.muted;
               return (
                 <div key={p.id} style={Object.assign({display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 0"}, S.separator)}>
                   <div>
                     <div style={{fontSize:15, color:"#fff", fontFamily:"system-ui"}}>{p.emoji+" "+p.name}</div>
-                    {paid > 0 && <div style={{fontSize:11, color:CL.blue, fontFamily:"system-ui"}}>{"paid $"+paid.toFixed(2)}</div>}
+                    <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>{"share $"+share.toFixed(2)+(paid > 0 ? " · paid $"+paid.toFixed(2) : "")}</div>
                   </div>
-                  <div style={{fontSize:16, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{"$"+share.toFixed(2)}</div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontSize:16, fontWeight:700, color:color, fontFamily:"system-ui"}}>{net > 0.01 ? "+$"+net.toFixed(2) : net < -0.01 ? "-$"+Math.abs(net).toFixed(2) : "$0.00"}</div>
+                    <div style={{fontSize:11, color:color, fontFamily:"system-ui"}}>{net > 0.01 ? "owed back" : net < -0.01 ? "owes" : "even"}</div>
+                  </div>
                 </div>
               );
             })}
           </div>
         )}
       </div>
-
-      {/* Balances card - who owes who */}
-      {expenses.length > 0 && (
-        <div style={S.card}>
-          <div style={S.cardTitle}>💰 Settle Up — Expenses Only</div>
-          <div style={Object.assign({}, S.label, {marginBottom:8})}>Separate from bets. Green = is owed · Red = owes.</div>
-          {players.map(function(p) {
-            var bal = balances[p.id] || 0;
-            var color = bal > 0.01 ? "#22c55e" : bal < -0.01 ? CL.red : CL.muted;
-            var label = bal > 0.01 ? "is owed" : bal < -0.01 ? "owes" : "even";
-            return (
-              <div key={p.id} style={Object.assign({display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 0"}, S.separator)}>
-                <div>
-                  <div style={{fontSize:15, color:"#fff", fontFamily:"system-ui"}}>{p.emoji+" "+p.name}</div>
-                  <div style={{fontSize:12, color:color, fontFamily:"system-ui"}}>{label}</div>
-                </div>
-                <div style={{fontSize:16, fontWeight:700, color:color, fontFamily:"system-ui"}}>{(bal >= 0 ? "+$" : "-$")+Math.abs(bal).toFixed(2)}</div>
-              </div>
-            );
-          })}
-        </div>
-      )}
 
         {expenses.length === 0 && !adding && (
           <div style={S.card}><div style={{textAlign:"center", padding:20}}>
