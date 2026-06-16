@@ -378,7 +378,7 @@ function proj(lat, lng, w, h) {
 var COAST = [[53.0,-6.0],[53.15,-6.15],[53.25,-6.22],[53.34,-6.25],[53.4,-6.15],[53.45,-6.08],[53.55,-6.0],[53.65,-5.98],[53.75,-6.0],[53.85,-5.95],[53.95,-5.85],[54.0,-5.78],[54.05,-5.7],[54.1,-5.6],[54.15,-5.52],[54.2,-5.48],[54.25,-5.44],[54.3,-5.45],[54.35,-5.5],[54.38,-5.55],[54.42,-5.58],[54.48,-5.52],[54.52,-5.48],[54.58,-5.48],[54.65,-5.52],[54.7,-5.58],[54.75,-5.65],[54.8,-5.68],[54.85,-5.72],[54.9,-5.78],[54.95,-5.82],[55.0,-5.82],[55.05,-5.78],[55.1,-5.72],[55.15,-5.68],[55.18,-5.65],[55.22,-5.62],[55.25,-5.65],[55.28,-5.72],[55.3,-5.82],[55.32,-5.92],[55.34,-6.02],[55.35,-6.15],[55.33,-6.28],[55.3,-6.38],[55.27,-6.48],[55.24,-6.55],[55.22,-6.62],[55.21,-6.72],[55.22,-6.82],[55.21,-6.92],[55.18,-7.0],[55.14,-7.08],[55.08,-7.15],[55.0,-7.18],[54.92,-7.2],[54.85,-7.18],[54.78,-7.15],[54.7,-7.12],[54.6,-7.1],[54.5,-7.08],[54.42,-7.05],[54.35,-6.98],[54.28,-6.9],[54.2,-6.82],[54.15,-6.75],[54.1,-6.65],[54.05,-6.55],[54.0,-6.45],[53.95,-6.38],[53.88,-6.32],[53.8,-6.3],[53.7,-6.28],[53.6,-6.25],[53.5,-6.22],[53.4,-6.2],[53.34,-6.25]];
 
 // ─── STYLES ──────────────────────────────────────────────────────────
-var CL = { bg:"#0a1225", card:"#111d35", border:"#1e3354", red:"#dc2626", blue:"#2563eb", cream:"#f0f4ff", text:"#cbd5e8", muted:"#6b82a8" };
+var CL = { bg:"#0a1225", card:"#111d35", border:"#1e3354", red:"#dc2626", blue:"#5b9bff", cream:"#f0f4ff", text:"#cbd5e8", muted:"#8aa0c4" };
 
 var S = {
   app:        { background:CL.bg, minHeight:"100vh", maxWidth:480, margin:"0 auto", fontFamily:"'Georgia','Times New Roman',serif", color:CL.text, paddingBottom:80 },
@@ -386,7 +386,7 @@ var S = {
   loading:    { display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", height:"100vh", background:CL.bg, color:"#fff" },
   hero:       { background:"linear-gradient(135deg,#111d35 0%,#0a1225 50%,#0e1a30 100%)", padding:"48px 24px 28px", textAlign:"center", borderBottom:"2px solid "+CL.red },
   card:       { background:CL.card, border:"1px solid "+CL.border, borderRadius:8, margin:"12px 16px", padding:16 },
-  cardTitle:  { fontSize:12, fontWeight:700, color:CL.red, letterSpacing:2, textTransform:"uppercase", marginBottom:10, fontFamily:"system-ui" },
+  cardTitle:  { fontSize:13, fontWeight:700, color:CL.red, letterSpacing:2, textTransform:"uppercase", marginBottom:10, fontFamily:"system-ui" },
   pageHeader: { display:"flex", justifyContent:"space-between", alignItems:"center", padding:"20px 16px 8px" },
   pageTitle:  { fontSize:22, fontWeight:700, color:"#fff", letterSpacing:1 },
   input:      { width:"100%", padding:"10px 12px", background:"rgba(30,58,95,0.25)", border:"1px solid "+CL.border, borderRadius:6, color:"#fff", fontSize:14, marginBottom:8, fontFamily:"system-ui", boxSizing:"border-box" },
@@ -403,17 +403,17 @@ var S = {
   scoreBtnOn: { background:CL.red, color:"#fff", borderColor:CL.red },
   nav:        { position:"fixed", bottom:0, left:"50%", transform:"translateX(-50%)", width:"100%", maxWidth:480, background:"rgba(17,29,53,0.95)", borderTop:"1px solid "+CL.border, display:"flex", justifyContent:"space-around", padding:"6px 0 env(safe-area-inset-bottom, 8px)", backdropFilter:"blur(12px)", zIndex:50 },
   navBtn:     { background:"none", border:"none", cursor:"pointer", display:"flex", flexDirection:"column", alignItems:"center", gap:2, padding:"6px 8px", minWidth:48 },
-  navLabel:   { fontSize:10, color:CL.muted, fontFamily:"system-ui", fontWeight:600 },
+  navLabel:   { fontSize:11, color:CL.muted, fontFamily:"system-ui", fontWeight:600 },
   // Reusable patterns
   row:        { display:"flex", alignItems:"center", gap:12, padding:"10px 0" },
   separator:  { borderBottom:"1px solid "+CL.border },
-  subTab:     { flex:1, padding:"8px 0", borderRadius:6, fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"system-ui" },
+  subTab:     { flex:1, padding:"9px 0", borderRadius:6, fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"system-ui" },
   subTabOff:  { background:CL.card, border:"1px solid "+CL.border, color:CL.muted },
   subTabOn:   { background:"rgba(220,38,38,0.15)", border:"1px solid "+CL.red, color:CL.red },
-  pillBtn:    { padding:"4px 10px", borderRadius:12, border:"1px solid "+CL.border, background:"rgba(30,58,95,0.2)", color:"#fff", fontSize:11, cursor:"pointer", fontFamily:"system-ui" },
+  pillBtn:    { padding:"5px 11px", borderRadius:12, border:"1px solid "+CL.border, background:"rgba(30,58,95,0.2)", color:"#fff", fontSize:12, cursor:"pointer", fontFamily:"system-ui" },
   teamBox:    { flex:1, borderRadius:6, padding:10, border:"1px solid "+CL.border, background:"rgba(30,58,95,0.15)" },
   teamBoxWin: { border:"1px solid rgba(220,38,38,0.3)", background:"rgba(220,38,38,0.1)" },
-  label:      { fontSize:11, color:CL.muted, fontFamily:"system-ui", fontWeight:600 },
+  label:      { fontSize:12.5, color:CL.muted, fontFamily:"system-ui", fontWeight:600 },
   white:      { color:"#fff" },
   bold:       { fontWeight:700 },
   sys:        { fontFamily:"system-ui" },
@@ -678,7 +678,7 @@ export default function App() {
         <button onClick={handleLogout} style={{fontSize:10, color:CL.muted, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:4, padding:"4px 8px", cursor:"pointer"}}>Switch</button>
       </div>
       <div style={S.content}>
-        {activeTab === "home" && <HomeTab players={players} lb={lb} currentPlayer={currentPlayer} />}
+        {activeTab === "home" && <HomeTab players={players} lb={lb} currentPlayer={currentPlayer} weatherCache={state.weatherCache} update={update} />}
         {activeTab === "itinerary" && <ItineraryTab weatherCache={state.weatherCache} update={update} />}
         {activeTab === "scores" && <ScoresTab players={players} scores={scores} sel={selectedRound} hole={scoringHole} setHole={setScoringHole} update={update} rs={rs} currentPlayer={currentPlayer} />}
         {activeTab === "leaderboard" && <LeaderboardTab players={players} scores={scores} lb={lb} rs={rs} currentPlayer={currentPlayer} />}
@@ -800,7 +800,7 @@ function HomeTab(props) {
                       <div key={p.id} style={{background:"rgba(30,58,95,0.3)", borderRadius:6, padding:"10px 12px", display:"flex", alignItems:"center", gap:8}}>
                         <span style={{fontSize:18}}>{p.emoji}</span>
                         <div>
-                          <div style={{fontSize:13, fontWeight:600, color:"#fff"}}>{p.name}</div>
+                          <div style={{fontSize:15, fontWeight:600, color:"#fff"}}>{p.name}</div>
                           <div style={{fontSize:11, color:CL.blue, fontFamily:"system-ui", fontWeight:600}}>{"HI "+p.handicap}</div>
                         </div>
                       </div>
@@ -818,12 +818,14 @@ function HomeTab(props) {
         {HOTELS.map(function(h, i) {
           return (
             <div key={i} style={Object.assign({padding:"10px 0"}, i < HOTELS.length-1 ? S.separator : {})}>
-              <div style={{fontSize:14, fontWeight:600, color:"#fff"}}>{h.name}</div>
+              <div style={{fontSize:15, fontWeight:600, color:"#fff"}}>{h.name}</div>
               <div style={S.label}>{h.loc+" · "+h.nights+" ("+h.n+" nights)"}</div>
             </div>
           );
         })}
       </div>
+
+      <WeatherCard weatherCache={props.weatherCache} update={props.update} />
     </div>
   );
 }
@@ -1176,7 +1178,7 @@ function ItineraryTab(props) {
         {CONTACTS.map(function(c, i) {
           return (
             <div key={i} style={Object.assign({display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 0"}, i < CONTACTS.length-1 ? S.separator : {})}>
-              <div><div style={{fontSize:13, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{c.name}</div><div style={S.label}>{c.note}</div></div>
+              <div><div style={{fontSize:15, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{c.name}</div><div style={S.label}>{c.note}</div></div>
               <a href={"tel:"+c.phone.replace(/\s/g,"")} style={{fontSize:13, color:CL.blue, fontFamily:"system-ui", fontWeight:600, textDecoration:"none"}} onClick={function(e) { e.stopPropagation(); }}>{c.phone}</a>
             </div>
           );
@@ -1346,7 +1348,7 @@ function ScoresTab(props) {
         return (
           <div key={player.id} style={S.card}>
             <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4}}>
-              <span style={{fontSize:14, fontWeight:600, color:"#fff"}}>{player.emoji+" "+player.name}</span>
+              <span style={{fontSize:15, fontWeight:600, color:"#fff"}}>{player.emoji+" "+player.name}</span>
               <div style={{display:"flex", gap:10, alignItems:"center"}}>
                 <div style={{textAlign:"center"}}>
                   <div style={{fontSize:9, color:CL.muted, fontFamily:"system-ui"}}>GROSS</div>
@@ -1974,14 +1976,14 @@ function BetsTab(props) {
                     return (
                       <div key={i} style={{display:"flex", alignItems:"center", padding:"12px 0", gap:8, borderBottom:i < transfers.length - 1 ? "1px solid " + CL.border : "none"}}>
                         <div style={{flex:1, textAlign:"right"}}>
-                          <div style={{fontSize:14, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{t.from.emoji + " " + t.from.name.split(" ")[0]}</div>
+                          <div style={{fontSize:15, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{t.from.emoji + " " + t.from.name.split(" ")[0]}</div>
                         </div>
                         <div style={{display:"flex", flexDirection:"column", alignItems:"center", minWidth:80}}>
                           <div style={{fontSize:18, fontWeight:700, color:CL.red, fontFamily:"system-ui"}}>{"$" + t.amount}</div>
                           <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>→ pays →</div>
                         </div>
                         <div style={{flex:1}}>
-                          <div style={{fontSize:14, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{t.to.emoji + " " + t.to.name.split(" ")[0]}</div>
+                          <div style={{fontSize:15, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{t.to.emoji + " " + t.to.name.split(" ")[0]}</div>
                         </div>
                       </div>
                     );
@@ -2020,7 +2022,7 @@ function BetsTab(props) {
               return (
                 <div key={p.id} style={Object.assign({padding:"12px 0"}, S.separator)}>
                   <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8}}>
-                    <div style={{fontSize:14, fontWeight:600, color:"#fff"}}>{p.emoji+" "+p.name}</div>
+                    <div style={{fontSize:15, fontWeight:600, color:"#fff"}}>{p.emoji+" "+p.name}</div>
                     <div style={{fontSize:16, fontWeight:700, color:totalDrinks(p.id)>0?CL.red:CL.muted, fontFamily:"system-ui"}}>{totalDrinks(p.id)}</div>
                   </div>
                   <div style={{display:"flex", gap:6}}>
@@ -2046,7 +2048,7 @@ function BetsTab(props) {
               return (
                 <div key={p.id} style={Object.assign({display:"flex", alignItems:"center", padding:"8px 0", gap:10}, S.separator)}>
                   <div style={{fontSize:16, width:24, textAlign:"center"}}>{i===0?"👑":i+1}</div>
-                  <div style={{flex:1}}><div style={{fontSize:13, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{p.emoji+" "+p.name}</div><div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>{(pd.pints?pd.pints+"🍺 ":"")+(pd.whiskey?pd.whiskey+"🥃 ":"")+(pd.wine?pd.wine+"🍷 ":"")+(pd.other?pd.other+"🍹":"")}</div></div>
+                  <div style={{flex:1}}><div style={{fontSize:15, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{p.emoji+" "+p.name}</div><div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>{(pd.pints?pd.pints+"🍺 ":"")+(pd.whiskey?pd.whiskey+"🥃 ":"")+(pd.wine?pd.wine+"🍷 ":"")+(pd.other?pd.other+"🍹":"")}</div></div>
                   <div style={{fontSize:18, fontWeight:700, color:p.total>0?CL.red:CL.muted, fontFamily:"system-ui"}}>{p.total}</div>
                 </div>
               );
