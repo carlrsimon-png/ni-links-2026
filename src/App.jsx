@@ -473,9 +473,7 @@ function PinScreen(props) {
 
   return (
     <div style={Object.assign({}, S.loading, {padding:24})}>
-      <div style={{fontSize:11, letterSpacing:6, color:CL.red, fontFamily:"system-ui", fontWeight:600}}>THE</div>
-      <div style={{fontSize:26, fontWeight:700, color:"#fff", letterSpacing:3, lineHeight:1.1}}>NORTHERN IRISH</div>
-      <div style={{fontSize:26, fontWeight:700, color:"#fff", letterSpacing:3, lineHeight:1.1, marginBottom:4}}>LINKS</div>
+      <img src="/logo.png" alt="Northern Irish Links 2026" onError={function(e){e.target.style.display="none";}} style={{width:160, height:160, marginBottom:16}} />
       <div style={{display:"flex", justifyContent:"center", gap:6, marginBottom:24}}>
         {[CL.red, "#fff", CL.blue].map(function(c,i) { return <div key={i} style={{width:20, height:3, borderRadius:2, background:c}} />; })}
       </div>
@@ -514,7 +512,7 @@ function PlayerSelectScreen(props) {
   var players = props.players;
   return (
     <div style={Object.assign({}, S.loading, {padding:24, justifyContent:"flex-start", paddingTop:60})}>
-      <div style={{fontSize:36, marginBottom:8}}>⛳</div>
+      <img src="/logo.png" alt="Northern Irish Links 2026" onError={function(e){e.target.style.display="none";}} style={{width:100, height:100, marginBottom:12}} />
       <div style={{fontSize:20, fontWeight:700, color:"#fff", marginBottom:4}}>Who are you?</div>
       <div style={{fontSize:13, color:CL.muted, fontFamily:"system-ui", marginBottom:24}}>Select your name to personalize the app</div>
 
@@ -645,7 +643,7 @@ export default function App() {
 
   if (loading || !auth.loaded) return (
     <div style={S.loading}>
-      <div style={{fontSize:48}}>⛳</div>
+      <img src="/logo.png" alt="Northern Irish Links 2026" onError={function(e){e.target.style.display="none";}} style={{width:120, height:120}} />
       <div style={{color:CL.muted, fontFamily:"system-ui", marginTop:12}}>Loading...</div>
     </div>
   );
@@ -715,6 +713,7 @@ function HomeTab(props) {
   return (
     <div>
       <div style={S.hero}>
+        <img src="/logo.png" alt="Northern Irish Links 2026" onError={function(e){e.target.style.display="none";}} style={{width:140, height:140, marginBottom:12}} />
         <div style={{fontSize:11, letterSpacing:6, color:CL.red, fontFamily:"system-ui", fontWeight:600}}>THE</div>
         <div style={{fontSize:30, fontWeight:700, color:"#fff", letterSpacing:3, lineHeight:1.1}}>NORTHERN IRISH</div>
         <div style={{fontSize:30, fontWeight:700, color:"#fff", letterSpacing:3, lineHeight:1.1}}>LINKS</div>
@@ -989,50 +988,107 @@ function TripMap() {
   );
 }
 
+// Open-Meteo weather code → condition mapping (WMO codes)
+function wmoCondition(code) {
+  if (code === 0) return "Clear";
+  if (code <= 2) return "Partly Cloudy";
+  if (code === 3) return "Cloudy";
+  if (code <= 48) return "Fog";
+  if (code <= 57) return "Light Rain";
+  if (code <= 67) return "Rain";
+  if (code <= 77) return "Snow";
+  if (code <= 82) return "Showers";
+  if (code <= 86) return "Snow";
+  return "Thunderstorms";
+}
+
+// Weather locations along the trip (lat/lng + label)
+var WEATHER_LOCATIONS = [
+  { key:"newcastle", label:"Newcastle (RCD / Ardglass)", lat:54.2179, lng:-5.8869 },
+  { key:"portrush", label:"Portrush (Portrush / Portstewart)", lat:55.2057, lng:-6.6562 },
+  { key:"castlerock", label:"Castlerock", lat:55.1647, lng:-6.7742 },
+];
+
 function WeatherCard(props) {
   var cache = props.weatherCache, update = props.update;
   var ld = useState(false); var loading = ld[0], setLoading = ld[1];
   var er = useState(null); var err = er[0], setErr = er[1];
+  var li = useState(0); var locIdx = li[0], setLocIdx = li[1];
 
   var isStale = !cache || !cache.ts || (Date.now() - cache.ts > 3600000);
 
-  var fetchWeather = function() {
+  var fetchWeather = function(idx) {
+    var loc = WEATHER_LOCATIONS[idx];
     setLoading(true); setErr(null);
-    fetch("https://api.anthropic.com/v1/messages", {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({
-        model:"claude-sonnet-4-6", max_tokens:1000,
-        tools:[{type:"web_search_20250305",name:"web_search"}],
-        messages:[{role:"user",content:"Search for the current weather and 5-day forecast for Portrush, Northern Ireland. Return ONLY valid JSON, no markdown, no backticks. Format: {\"current\":{\"temp_f\":62,\"condition\":\"Sunny\",\"wind_mph\":12,\"humidity\":63},\"forecast\":[{\"day\":\"Sat 14\",\"hi\":59,\"lo\":52,\"condition\":\"Partly Cloudy\",\"rain_pct\":10,\"wind_mph\":15}]} Include today plus 4 more days. Fahrenheit. Conditions: Sunny, Partly Cloudy, Cloudy, Light Rain, Rain, Showers, Thunderstorms, Fog."}]
-      })
-    })
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      var text = "";
-      if (data.content) data.content.forEach(function(item) { if (item.type==="text") text += item.text; });
-      var m = text.replace(/```json/g,"").replace(/```/g,"").trim().match(/\{[\s\S]*\}/);
-      if (m) {
-        var parsed = Object.assign(JSON.parse(m[0]), { ts: Date.now() });
+    var url = "https://api.open-meteo.com/v1/forecast?latitude=" + loc.lat + "&longitude=" + loc.lng +
+      "&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m" +
+      "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max" +
+      "&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=inch&timezone=Europe/London&forecast_days=7";
+    fetch(url)
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (!data || !data.current || !data.daily) { setErr("Weather unavailable. Try again."); setLoading(false); return; }
+        var cur = data.current;
+        var daily = data.daily;
+        var dayNames = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+        var forecast = daily.time.map(function(dateStr, i) {
+          var d = new Date(dateStr + "T12:00:00");
+          return {
+            day: dayNames[d.getDay()] + " " + d.getDate(),
+            hi: Math.round(daily.temperature_2m_max[i]),
+            lo: Math.round(daily.temperature_2m_min[i]),
+            condition: wmoCondition(daily.weather_code[i]),
+            rain_pct: daily.precipitation_probability_max[i] != null ? daily.precipitation_probability_max[i] : 0,
+            wind_mph: Math.round(daily.wind_speed_10m_max[i]),
+          };
+        });
+        var parsed = {
+          location: WEATHER_LOCATIONS[idx].label,
+          locIdx: idx,
+          current: {
+            temp_f: Math.round(cur.temperature_2m),
+            condition: wmoCondition(cur.weather_code),
+            wind_mph: Math.round(cur.wind_speed_10m),
+            humidity: Math.round(cur.relative_humidity_2m),
+          },
+          forecast: forecast,
+          ts: Date.now(),
+        };
         update({ weatherCache: parsed });
-      } else { setErr("Could not parse. Try again."); }
-    })
-    .catch(function() { setErr("Weather fetch failed. Try again."); })
-    .finally(function() { setLoading(false); });
+        setLoading(false);
+      })
+      .catch(function() { setErr("Weather fetch failed. Check connection."); setLoading(false); });
   };
+
+  // Auto-load on first mount or when stale
+  useEffect(function() {
+    if (isStale) fetchWeather(locIdx);
+  }, []);
+
+  function switchLocation(idx) {
+    setLocIdx(idx);
+    fetchWeather(idx);
+  }
 
   var w = cache;
   return (
     <div style={S.card}>
       <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10}}>
-        <div style={S.cardTitle}>🌤️ Weather — Portrush</div>
-        <button onClick={fetchWeather} disabled={loading} style={Object.assign({}, S.addBtn, {fontSize:11, opacity:loading?0.6:1})}>
-          {loading ? "Loading..." : w && !isStale ? "Refresh" : "Check Weather"}
+        <div style={S.cardTitle}>🌤️ Weather Forecast</div>
+        <button onClick={function() { fetchWeather(locIdx); }} disabled={loading} style={Object.assign({}, S.addBtn, {fontSize:11, opacity:loading?0.6:1})}>
+          {loading ? "Loading..." : "Refresh"}
         </button>
       </div>
 
-      {!w && !loading && !err && <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", textAlign:"center", padding:12}}>Tap Check Weather for a live forecast.</div>}
+      {/* Location selector */}
+      <div style={{display:"flex", gap:4, marginBottom:10, flexWrap:"wrap"}}>
+        {WEATHER_LOCATIONS.map(function(loc, i) {
+          return <button key={loc.key} onClick={function() { switchLocation(i); }} style={Object.assign({}, S.subTab, locIdx===i ? S.subTabOn : S.subTabOff, {fontSize:10, flex:"none", padding:"6px 10px"})}>{loc.label.split(" (")[0]}</button>;
+        })}
+      </div>
+
       {err && <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", padding:8}}>{err}</div>}
-      {loading && <div style={{textAlign:"center", padding:16}}><div style={{fontSize:24}}>🔍</div><div style={{color:CL.muted, fontFamily:"system-ui", fontSize:12, marginTop:4}}>Searching...</div></div>}
+      {loading && !w && <div style={{textAlign:"center", padding:16}}><div style={{fontSize:24}}>🌤️</div><div style={{color:CL.muted, fontFamily:"system-ui", fontSize:12, marginTop:4}}>Loading forecast...</div></div>}
 
       {w && w.current && (
         <div>
@@ -1050,7 +1106,7 @@ function WeatherCard(props) {
               </div>
             );
           })}
-          {isStale && <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui", marginTop:6, textAlign:"center"}}>Last updated more than 1hr ago. Tap Refresh.</div>}
+          <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui", marginTop:8, textAlign:"center"}}>{"Powered by Open-Meteo · "+(isStale?"Tap Refresh to update":"Updated just now")}</div>
         </div>
       )}
     </div>
@@ -1173,40 +1229,18 @@ function ScoresTab(props) {
     if (!file) return;
     setScanLoading(true); setScanErr(null); setScanData(null);
 
-    var reader = new FileReader();
-    reader.onload = function() {
-      var b64 = reader.result.split(",")[1];
-      fetch("https://api.anthropic.com/v1/messages", {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({
-          model:"claude-sonnet-4-6", max_tokens:1000,
-          messages:[{role:"user", content:[
-            {type:"image", source:{type:"base64", media_type:file.type||"image/jpeg", data:b64}},
-            {type:"text", text:"Golf scorecard photo. Extract every player's 18 hole scores. Return ONLY JSON: {\"players\":[{\"name\":\"Name\",\"scores\":[4,5,3,...]}]} Use 0 for missing holes. Use names from card or Row 1, Row 2, etc."}
-          ]}]
-        })
-      })
-      .then(function(r) { return r.json(); })
-      .then(function(data) {
-        var text = "";
-        data.content.forEach(function(item) { if (item.type==="text") text += item.text; });
-        var m = text.replace(/```json/g,"").replace(/```/g,"").trim().match(/\{[\s\S]*\}/);
-        if (m) setScanData(JSON.parse(m[0]));
-        else setScanErr("Could not read scorecard. Try a clearer photo.");
-      })
-      .catch(function() { setScanErr("Scan failed. Try again."); })
-      .finally(function() { setScanLoading(false); });
-    };
-    reader.readAsDataURL(file);
+    // Note: AI photo scanning requires a backend API key which isn't available
+    // in the deployed app. Direct users to manual entry (tap any hole to enter scores).
+    setTimeout(function() {
+      setScanLoading(false);
+      setScanErr("Photo scanning isn't available in the live app. Tap any hole below to enter scores manually — it's quick and works great!");
+    }, 400);
   }
 
   return (
     <div>
       <div style={S.pageHeader}>
         <div style={S.pageTitle}>Scorecard</div>
-        <button onClick={function() { setScanning(!scanning); setScanData(null); setScanErr(null); }} style={Object.assign({}, S.addBtn, {fontSize:12})}>
-          {scanning ? "✕ Close" : "📷 Scan"}
-        </button>
       </div>
 
       {scanning && (
