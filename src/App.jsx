@@ -3,7 +3,6 @@ import { subscribeToState, saveState as firebaseSave, subscribeToChat, sendChatM
 
 // ─── DATA ────────────────────────────────────────────────────────────
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
-const STORAGE_KEY = "ni-links-2026";
 const AUTH_KEY = "ni-links-auth";
 const GROUP_PIN = "2026";
 
@@ -169,7 +168,6 @@ function defaultState() {
     h2hBets: [],
     teamMatches: [],
     drinks: {},
-    chatMessages: [],
     weatherCache: null,
   };
 }
@@ -288,6 +286,7 @@ function calculateSettleUp(players, games, bets, h2hBets, teamMatches) {
 
   // Side games
   games.forEach(function(g) {
+    if (!g.results) return;
     players.forEach(function(p) {
       balances[p.id] = (balances[p.id] || 0) + (g.results[p.id] || 0);
     });
@@ -303,6 +302,7 @@ function calculateSettleUp(players, games, bets, h2hBets, teamMatches) {
       if (b.winner === "teamA") winIds = resolveTeam(matchup0.teamA, players);
       else if (b.winner === "teamB") winIds = resolveTeam(matchup0.teamB, players);
       else { var wp = players.find(function(p) { return p.id === b.winner; }); if (wp) winIds = [wp.id]; }
+      if (winIds.length === 0) return; // no valid winner — skip
       var loseIds = players.filter(function(p) { return winIds.indexOf(p.id) === -1; }).map(function(p) { return p.id; });
       var totalPot = buyin * players.length;
       var winEach = totalPot / winIds.length;
@@ -319,6 +319,7 @@ function calculateSettleUp(players, games, bets, h2hBets, teamMatches) {
       var sB = b.sideB || [b.opponent];
       var winSide = b.winningSide === "a" ? sA : sB;
       var loseSide = b.winningSide === "a" ? sB : sA;
+      if (winSide.length === 0) return; // no valid winning side
       var loseTotal = loseSide.length * b.stake;
       var winEach = loseTotal / winSide.length;
       loseSide.forEach(function(pid) { balances[pid] = (balances[pid] || 0) - b.stake; });
@@ -540,8 +541,10 @@ export default function App() {
   var state = st[0], setState = st[1];
   var ld = useState(true); var loading = ld[0], setLoading = ld[1];
   var sh = useState(null); var scoringHole = sh[0], setScoringHole = sh[1];
-  var authState = loadAuth();
-  var as = useState({ authed:authState ? authState.authed : false, playerId:authState ? authState.playerId : null, loaded:true });
+  var as = useState(function() {
+    var authState = loadAuth();
+    return { authed:authState ? authState.authed : false, playerId:authState ? authState.playerId : null, loaded:true };
+  });
   var auth = as[0], setAuth = as[1];
 
   // Real-time Firebase subscription for game state
@@ -552,6 +555,11 @@ export default function App() {
         if (!merged.scores || Object.keys(merged.scores).length === 0) {
           merged.scores = initScores(merged.players);
         }
+        // Always use latest handicaps from code — overrides stale Firebase values
+        merged.players = merged.players.map(function(p) {
+          var latest = DEFAULT_PLAYERS.find(function(d) { return d.id === p.id; });
+          return latest ? Object.assign({}, p, { handicap: latest.handicap }) : p;
+        });
         merged.players.forEach(function(p) {
           if (!merged.scores[p.id]) {
             merged.scores[p.id] = {};
@@ -630,6 +638,7 @@ export default function App() {
       games: fresh.games,
       bets: fresh.bets,
       h2hBets: fresh.h2hBets,
+      teamMatches: fresh.teamMatches,
       drinks: fresh.drinks,
     });
   };
@@ -682,7 +691,7 @@ export default function App() {
         {TABS.map(function(t) {
           var active = activeTab === t.id;
           return (
-            <button key={t.id} onClick={function() { update({ activeTab:t.id }); }} style={S.navBtn}>
+            <button key={t.id} onClick={function() { setState(function(prev) { return Object.assign({}, prev, { activeTab:t.id }); }); }} style={S.navBtn}>
               <span style={{fontSize:18}}>{t.icon}</span>
               <span style={Object.assign({}, S.navLabel, active ? {color:CL.red} : {})}>{t.label}</span>
             </button>
@@ -772,17 +781,37 @@ function HomeTab(props) {
 
       <div style={S.card}>
         <div style={S.cardTitle}>The Squad</div>
-        <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:8}}>
-          {players.map(function(p) {
+        {(function() {
+          var matchup = TEAM_MATCHUPS[0];
+          var teams = [matchup.teamA, matchup.teamB];
+          return teams.map(function(team) {
+            var teamPlayers = team.names.map(function(name) {
+              return players.find(function(p) { return p.name === name; });
+            }).filter(Boolean);
+            var totalHcp = teamPlayers.reduce(function(t, p) { return t + (parseFloat(p.handicap) || 0); }, 0);
             return (
-              <div key={p.id} style={{background:"rgba(30,58,95,0.3)", borderRadius:6, padding:12, textAlign:"center"}}>
-                <div style={{fontSize:24, marginBottom:4}}>{p.emoji}</div>
-                <div style={{fontSize:13, fontWeight:600, color:"#fff"}}>{p.name}</div>
-                <div style={S.label}>{"HCP "+p.handicap}</div>
+              <div key={team.name} style={{marginBottom:12}}>
+                <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6}}>
+                  <div style={{fontSize:13, fontWeight:700, color:"#fff"}}>{team.emoji+" "+team.name}</div>
+                  <div style={{fontSize:11, color:CL.red, fontFamily:"system-ui", fontWeight:600}}>{"Total HI: "+totalHcp.toFixed(1)}</div>
+                </div>
+                <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:6}}>
+                  {teamPlayers.map(function(p) {
+                    return (
+                      <div key={p.id} style={{background:"rgba(30,58,95,0.3)", borderRadius:6, padding:"10px 12px", display:"flex", alignItems:"center", gap:8}}>
+                        <span style={{fontSize:18}}>{p.emoji}</span>
+                        <div>
+                          <div style={{fontSize:13, fontWeight:600, color:"#fff"}}>{p.name}</div>
+                          <div style={{fontSize:11, color:CL.blue, fontFamily:"system-ui", fontWeight:600}}>{"HI "+p.handicap}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             );
-          })}
-        </div>
+          });
+        })()}
       </div>
 
       <div style={S.card}>
@@ -1543,7 +1572,7 @@ function BetsTab(props) {
   var eis = useState(null); var editId = eis[0], setEditId = eis[1];
 
   function netMoney(pid) {
-    var total = games.reduce(function(t,g) { return t+(g.results[pid]||0); }, 0);
+    var total = games.reduce(function(t,g) { return t+((g.results && g.results[pid])||0); }, 0);
     // Add prop bet winnings
     bets.forEach(function(b) {
       if (!b.settled || !b.winner || !b.buyin) return;
@@ -1557,10 +1586,20 @@ function BetsTab(props) {
       var sB = b.sideB || [b.opponent];
       var winSide = b.winningSide === "a" ? sA : sB;
       var loseSide = b.winningSide === "a" ? sB : sA;
+      if (winSide.length === 0) return;
       var loseTotal = loseSide.length * b.stake;
       var winEach = loseTotal / winSide.length;
       if (loseSide.indexOf(pid) >= 0) total -= b.stake;
       if (winSide.indexOf(pid) >= 0) total += winEach;
+    });
+    // Add team match play results
+    var matchup0 = TEAM_MATCHUPS[0];
+    var myTeamIds = resolveTeam(matchup0.teamA, players);
+    var isTeamA = myTeamIds.indexOf(pid) >= 0;
+    teamMatches.forEach(function(m) {
+      if (!m.settled || !m.winner) return;
+      var won = (m.winner === "a" && isTeamA) || (m.winner === "b" && !isTeamA);
+      total += won ? m.stake : -m.stake;
     });
     return total;
   }
@@ -1614,7 +1653,7 @@ function BetsTab(props) {
         <div>
           <div style={S.card}>
             <div style={S.cardTitle}>🎯 Prop Bets</div>
-            <div style={Object.assign({}, S.label, {marginBottom:12})}>$10/player per round · Low team net wins the pot. Tap winning team to settle.</div>
+            <div style={Object.assign({}, S.label, {marginBottom:12})}>$20/player per round · Low team net wins the pot. Tap winning team to settle.</div>
             {bets.map(function(bet) {
               var matchup = TEAM_MATCHUPS[0];
               var isTeamBet = bet.name.indexOf("WASPs vs Italians") >= 0;
