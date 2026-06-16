@@ -12,7 +12,7 @@ const ITINERARY = [
   { day:2, date:"Sun, Jun 28", title:"Royal County Down", type:"golf", teeTime:"2:21 PM", courseIdx:1, description:"Free morning. Explore Newcastle or the Mourne Mountains.", hotel:"Slieve Donard Resort & Spa", hotelLoc:"Newcastle", sightseeing:"Visit Downpatrick — Saint Patrick Centre & St. Patrick's Grave at Down Cathedral." },
   { day:3, date:"Mon, Jun 29", title:"Castlerock", type:"golf", teeTime:"1:06 PM", courseIdx:2, description:"~2hr 20min transfer north along the Antrim coast.", hotel:"Bushmills Inn", hotelLoc:"Bushmills", driveToHotel:"Check in at Bushmills Inn", events:[{time:"8:00 PM",name:"Group Dinner — Bushmills Inn",detail:"Reservation for the group. Tel: (0) 28 2073 3000.",icon:"🍽️"}] },
   { day:4, date:"Tue, Jun 30", title:"Royal Portrush", type:"golf", teeTime:"9:40 AM", courseIdx:3, description:"15 min from Bushmills to Portrush. Morning round on the Dunluce Links.", hotel:"Bushmills Inn", hotelLoc:"Bushmills", sightseeing:"Giant's Causeway, Dunluce Castle, Carrick-a-Rede Rope Bridge.", events:[{time:"3:30 PM",name:"Old Bushmills Distillery Tour",detail:"2 Distillery Rd, Bushmills BT57 8XH. Conf #8995255.",icon:"🥃"}] },
-  { day:5, date:"Wed, Jul 1", title:"Portstewart", type:"golf", teeTime:"10:30 AM", courseIdx:4, description:"25 min to Portstewart. After golf, ~3.5hr transfer to Dublin.", hotel:"Conrad Dublin", hotelLoc:"Dublin", driveToHotel:"3.5 hr transfer to Dublin" },
+  { day:5, date:"Wed, Jul 1", title:"Portstewart", type:"golf", teeTime:"10:30 AM", courseIdx:4, description:"25 min to Portstewart. After golf, ~3.5hr transfer to Dublin.", hotel:"Conrad Dublin", hotelLoc:"Dublin", driveToHotel:"3.5 hr transfer to Dublin", events:[{time:"8:15 PM",name:"Dinner — Mister S",detail:"Dublin. Ref: BXYCDLZ2 · Party of 8. À la carte, min 2 courses pp after 4pm.",icon:"🍽️"}] },
   { day:6, date:"Thu, Jul 2", title:"Dublin → Home", type:"travel", description:"JetBlue Flight 842 · Dublin → JFK.", hotel:"Conrad Dublin", hotelLoc:"Dublin", events:[{time:"TBD",name:"JetBlue B6 842",detail:"DUB → JFK · Economy",icon:"✈️"}] },
   { day:7, date:"Fri, Jul 3", title:"Tour Ends", type:"travel", description:"Arrive home.", hotel:null },
 ];
@@ -1149,6 +1149,38 @@ function ItineraryTab(props) {
     <div>
       <div style={S.pageHeader}><div style={S.pageTitle}>Trip Itinerary</div></div>
       <TripMap />
+
+      {/* Shuttle / transfer schedule */}
+      <div style={S.card}>
+        <div style={S.cardTitle}>🚐 Shuttle Schedule</div>
+        <div style={Object.assign({}, S.label, {marginBottom:10})}>PerryGolf VIP coach transfers between every stop.</div>
+        {(function() {
+          var stopMap = {};
+          MAP_STOPS.forEach(function(s) { stopMap[s.id] = s; });
+          var dayByStop = { ardglass:"Sat Jun 27", rcd:"Sun Jun 28", castlerock:"Mon Jun 29", portrush:"Tue Jun 30", portstewart:"Wed Jul 1" };
+          return ROUTE_LEGS.map(function(leg, i) {
+            var from = stopMap[leg.from], to = stopMap[leg.to];
+            if (!from || !to) return null;
+            var dayLabel = dayByStop[leg.to] || "";
+            return (
+              <div key={i} style={Object.assign({display:"flex", alignItems:"center", gap:10, padding:"10px 0"}, i < ROUTE_LEGS.length-1 ? S.separator : {})}>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:14, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{from.label}</div>
+                  <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", margin:"2px 0"}}>{"↓ to"}</div>
+                  <div style={{fontSize:14, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{to.label}</div>
+                  {dayLabel && <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui", marginTop:2}}>{dayLabel}</div>}
+                </div>
+                <div style={{textAlign:"center", background:"rgba(91,155,255,0.12)", border:"1px solid rgba(91,155,255,0.3)", borderRadius:8, padding:"8px 12px", minWidth:64}}>
+                  <div style={{fontSize:16}}>🚐</div>
+                  <div style={{fontSize:14, fontWeight:700, color:CL.blue, fontFamily:"system-ui"}}>{leg.time}</div>
+                </div>
+              </div>
+            );
+          });
+        })()}
+        <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui", marginTop:8, textAlign:"center"}}>Drive times approximate · subject to traffic & weather</div>
+      </div>
+
       <WeatherCard weatherCache={props.weatherCache} update={props.update} />
 
       {ITINERARY.map(function(day, i) {
