@@ -2,10 +2,12 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "1.1";
+const APP_VERSION = "1.2";
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
 const AUTH_KEY = "ni-links-auth";
 const GROUP_PIN = "2026";
+// Only these players (Brian Smith, Carl Simon) can edit Bets & Expenses — the "gatekeepers" of the books.
+const BOOKKEEPER_IDS = ["p2", "p6"];
 
 const ITINERARY = [
   { day:0, date:"Fri, Jun 26", title:"Depart USA", type:"travel", description:"JetBlue Flight 841 · JFK → Dublin. Evening departure.", hotel:null, events:[{time:"Evening",name:"JetBlue B6 841",detail:"JFK → DUB · Economy",icon:"✈️"}] },
@@ -784,12 +786,25 @@ export default function App() {
   // re-reading localStorage on every keystroke or re-creating the callback.
   var guestRef = useRef(false);
   guestRef.current = auth.guest === true;
+  // Track whether the current player may edit the books (Bets & Expenses).
+  var canEditBooksRef = useRef(false);
+  canEditBooksRef.current = auth.guest !== true && BOOKKEEPER_IDS.indexOf(auth.playerId) >= 0;
 
   // Debounced save to Firebase
   var saveTimer = useRef(null);
   var update = useCallback(function(changes) {
     // Master guard: guests can never write synced data to Firebase.
     var isGuestWrite = guestRef.current;
+    // Book guard: only gatekeepers may write bet/expense data. Strip those changes
+    // for everyone else (scores/players/etc. remain editable by all players).
+    if (!canEditBooksRef.current) {
+      var bookFields = ["games", "bets", "individualProps", "h2hBets", "teamMatches", "drinks", "expenses", "customBets"];
+      var stripped = false;
+      bookFields.forEach(function(f) {
+        if (Object.prototype.hasOwnProperty.call(changes, f)) { delete changes[f]; stripped = true; }
+      });
+      if (stripped && Object.keys(changes).length === 0) return; // nothing left to apply
+    }
     setState(function(prev) {
       var next = Object.assign({}, prev, changes);
       // Save to Firebase (debounced to avoid hammering Firestore) — never for guests
@@ -856,6 +871,9 @@ export default function App() {
 
   var isGuest = auth.guest === true;
   var currentPlayer = isGuest ? null : state.players.find(function(p) { return p.id === auth.playerId; });
+  // Only the bookkeepers (Brian, Carl) may edit Bets & Expenses. Everyone else views them read-only.
+  var canEditBooks = !isGuest && BOOKKEEPER_IDS.indexOf(auth.playerId) >= 0;
+  var booksReadOnly = !canEditBooks;
 
   var TABS = [
     { id:"home", icon:"🏠", label:"Home" },
@@ -892,7 +910,7 @@ export default function App() {
             <div style={{fontSize:14, color:CL.muted, fontFamily:"system-ui", marginBottom:20}}>Sign in with the group passcode to view bets and games.</div>
             <button onClick={handleLogout} style={Object.assign({}, S.primaryBtn, {width:"auto", padding:"12px 32px"})}>Sign In</button>
           </div>
-        ) : <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} isGuest={isGuest} />)}
+        ) : <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} isGuest={booksReadOnly} canEdit={canEditBooks} />)}
         {activeTab === "expenses" && (isGuest ? (
           <div style={{padding:"60px 24px", textAlign:"center"}}>
             <div style={{fontSize:48, marginBottom:16}}>🔒</div>
@@ -900,7 +918,7 @@ export default function App() {
             <div style={{fontSize:14, color:CL.muted, fontFamily:"system-ui", marginBottom:20}}>Sign in with the group passcode to view and track expenses.</div>
             <button onClick={handleLogout} style={Object.assign({}, S.primaryBtn, {width:"auto", padding:"12px 32px"})}>Sign In</button>
           </div>
-        ) : <ExpensesTab players={players} expenses={state.expenses || []} update={update} isGuest={isGuest} />)}
+        ) : <ExpensesTab players={players} expenses={state.expenses || []} update={update} isGuest={booksReadOnly} canEdit={canEditBooks} />)}
         {activeTab === "chat" && <ChatTab currentPlayer={currentPlayer} players={players} isGuest={isGuest} />}
       </div>
       <nav style={S.nav}>
@@ -2179,6 +2197,7 @@ function BetsTab(props) {
   return (
     <div>
       <div style={S.pageHeader}><div style={S.pageTitle}>Bets & Games</div></div>
+      {props.isGuest && <div style={{margin:"0 16px 8px", padding:"8px 12px", background:"rgba(111,172,255,0.1)", border:"1px solid "+CL.border, borderRadius:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>👁️ View only — Brian & Carl manage the books. Talk to them to record a bet.</div>}
       <div style={{display:"flex", gap:4, padding:"0 16px", marginBottom:8}}>
         {subTabs.map(function(t) { return <button key={t.id} onClick={function() { setTab(t.id); }} style={Object.assign({}, S.subTab, tab===t.id ? S.subTabOn : S.subTabOff)}>{t.label}</button>; })}
       </div>
@@ -2939,6 +2958,7 @@ function ExpensesTab(props) {
         <div style={S.pageTitle}>Trip Expenses</div>
         {!props.isGuest && <button onClick={function() { setAdding(!adding); }} style={Object.assign({}, S.addBtn, {fontSize:14})}>{adding ? "Cancel" : "+ Add"}</button>}
       </div>
+      {props.isGuest && <div style={{margin:"0 16px 8px", padding:"8px 12px", background:"rgba(111,172,255,0.1)", border:"1px solid "+CL.border, borderRadius:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>👁️ View only — Brian & Carl manage the books. Give them your expenses to log.</div>}
 
       {/* Summary card */}
       <div style={S.card}>
