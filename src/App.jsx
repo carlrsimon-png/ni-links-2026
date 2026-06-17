@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
@@ -252,6 +252,87 @@ function getLeaderboard(players, scores) {
     .sort(function(a, b) { return a.total - b.total; });
 }
 
+// ─── STABLEFORD ──────────────────────────────────────────────────────
+// Strokes received on a given hole based on course handicap and stroke index.
+// e.g. course handicap 14 → one stroke on SI 1-14, two strokes on SI 1-... if >18
+function strokesOnHole(courseHcp, holeSI) {
+  if (courseHcp <= 0) return 0;
+  var s = 0;
+  if (holeSI <= courseHcp) s += 1;
+  if (holeSI <= courseHcp - 18) s += 1; // second stroke for high handicaps
+  return s;
+}
+
+// Stableford points for one hole: net score vs par.
+// Net double-eagle+ caps at 5 (rare), eagle 4, birdie 3, par 2, bogey 1, double+ 0.
+function stablefordPointsForHole(gross, par, courseHcp, holeSI) {
+  if (gross === null || gross === undefined) return null;
+  var net = gross - strokesOnHole(courseHcp, holeSI);
+  var diff = net - par; // negative = under par
+  if (diff <= -3) return 5;
+  if (diff === -2) return 4;
+  if (diff === -1) return 3;
+  if (diff === 0) return 2;
+  if (diff === 1) return 1;
+  return 0;
+}
+
+// Total Stableford points for a player on one round
+function getRoundStableford(scores, pid, ri, handicap) {
+  var h = scores[pid] && scores[pid][ri];
+  if (!h) return null;
+  var course = COURSES[ri];
+  if (!course || !course.pars || !course.si) return null;
+  var courseHcp = getCourseHandicap(handicap, ri);
+  var played = false;
+  var pts = 0;
+  for (var i = 0; i < 18; i++) {
+    if (h[i] !== null && h[i] !== undefined) {
+      played = true;
+      pts += stablefordPointsForHole(h[i], course.pars[i], courseHcp, course.si[i]);
+    }
+  }
+  return played ? pts : null;
+}
+
+// Total Stableford across all rounds for a player
+function getTotalStableford(scores, pid, handicap) {
+  var t = 0;
+  var any = false;
+  COURSES.forEach(function(_, ri) {
+    var p = getRoundStableford(scores, pid, ri, handicap);
+    if (p !== null) { t += p; any = true; }
+  });
+  return any ? t : null;
+}
+
+// Team Stableford for a round — sum of the best N scores on the team that round.
+// bestN = how many scores count (e.g. 2 of 4). Default: all count.
+function getTeamRoundStableford(scores, players, teamIds, ri, bestN) {
+  var pts = teamIds.map(function(pid) {
+    var p = players.find(function(x) { return x.id === pid; });
+    if (!p) return null;
+    return getRoundStableford(scores, pid, ri, p.handicap);
+  }).filter(function(v) { return v !== null; });
+  if (pts.length === 0) return null;
+  pts.sort(function(a, b) { return b - a; }); // highest first
+  var count = bestN && bestN < pts.length ? bestN : pts.length;
+  var t = 0;
+  for (var i = 0; i < count; i++) t += pts[i];
+  return t;
+}
+
+// Team Stableford total across all rounds
+function getTeamTotalStableford(scores, players, teamIds, bestN) {
+  var t = 0;
+  var any = false;
+  COURSES.forEach(function(_, ri) {
+    var p = getTeamRoundStableford(scores, players, teamIds, ri, bestN);
+    if (p !== null) { t += p; any = true; }
+  });
+  return any ? t : 0;
+}
+
 function getCountdown() {
   var now = new Date();
   var trip = new Date(TRIP_DATE);
@@ -377,14 +458,16 @@ function calculateSettleUp(players, games, bets, h2hBets, teamMatches, individua
     });
   }
 
-  // Trip expenses (split costs)
+  // Trip expenses (split costs) — net = what you paid minus your share
   if (expenses) {
     expenses.forEach(function(exp) {
       if (!exp.payer || !exp.splitAmong || exp.splitAmong.length === 0) return;
       var perPerson = exp.amount / exp.splitAmong.length;
-      balances[exp.payer] = (balances[exp.payer] || 0) + exp.amount - perPerson;
+      // Payer is credited the full amount they paid
+      balances[exp.payer] = (balances[exp.payer] || 0) + exp.amount;
+      // Everyone in the split (including payer if they're in it) is debited their share
       exp.splitAmong.forEach(function(pid) {
-        if (pid !== exp.payer) balances[pid] = (balances[pid] || 0) - perPerson;
+        balances[pid] = (balances[pid] || 0) - perPerson;
       });
     });
   }
@@ -554,6 +637,10 @@ function PinScreen(props) {
           );
         })}
       </div>
+
+      <button onClick={props.onGuest} style={{marginTop:28, background:"none", border:"1px solid "+CL.border, borderRadius:8, padding:"12px 24px", color:CL.muted, fontSize:14, fontFamily:"system-ui", cursor:"pointer"}}>
+        View as Guest (read only)
+      </button>
     </div>
   );
 }
@@ -589,6 +676,7 @@ export default function App() {
   var state = st[0], setState = st[1];
   var ld = useState(true); var loading = ld[0], setLoading = ld[1];
   var sh = useState(null); var scoringHole = sh[0], setScoringHole = sh[1];
+  var sv = useState("idle"); var saveStatus = sv[0], setSaveStatus = sv[1];
   var as = useState(function() {
     var authState = loadAuth();
     return { authed:authState ? authState.authed : false, playerId:authState ? authState.playerId : null, loaded:true };
@@ -596,9 +684,11 @@ export default function App() {
   var auth = as[0], setAuth = as[1];
 
   // Real-time Firebase subscription for game state
+  var hasLoadedData = useRef(false);
   useEffect(function() {
     var unsub = subscribeToState(function(data) {
       if (data) {
+        hasLoadedData.current = true;
         var merged = Object.assign({}, defaultState(), data);
         if (!merged.scores || Object.keys(merged.scores).length === 0) {
           merged.scores = initScores(merged.players);
@@ -615,8 +705,9 @@ export default function App() {
           }
         });
         setState(function(prev) { return Object.assign({}, prev, merged, { initialized:true }); });
-      } else {
-        // First time — seed Firestore with defaults
+      } else if (!hasLoadedData.current) {
+        // First time only — seed Firestore with defaults.
+        // Guarded so a transient offline/null callback can never wipe live data.
         var fresh = defaultState();
         firebaseSave({
           players: fresh.players,
@@ -637,31 +728,45 @@ export default function App() {
   }, []);
 
   function handlePinSuccess() {
-    var next = { authed:true, playerId:null, loaded:true };
+    var next = { authed:true, playerId:null, loaded:true, guest:false };
+    setAuth(next);
+    saveAuth(next);
+  }
+
+  function handleGuest() {
+    var next = { authed:true, playerId:"guest", loaded:true, guest:true };
     setAuth(next);
     saveAuth(next);
   }
 
   function handlePlayerSelect(pid) {
-    var next = { authed:true, playerId:pid, loaded:true };
+    var next = { authed:true, playerId:pid, loaded:true, guest:false };
     setAuth(next);
     saveAuth(next);
   }
 
   function handleLogout() {
-    var next = { authed:false, playerId:null, loaded:true };
+    var next = { authed:false, playerId:null, loaded:true, guest:false };
     setAuth(next);
     saveAuth(next);
   }
 
+  // Track guest status in a ref so the update callback can read it without
+  // re-reading localStorage on every keystroke or re-creating the callback.
+  var guestRef = useRef(false);
+  guestRef.current = auth.guest === true;
+
   // Debounced save to Firebase
   var saveTimer = useRef(null);
   var update = useCallback(function(changes) {
+    // Master guard: guests can never write synced data to Firebase.
+    var isGuestWrite = guestRef.current;
     setState(function(prev) {
       var next = Object.assign({}, prev, changes);
-      // Save to Firebase (debounced to avoid hammering Firestore)
-      if (changes.scores || changes.players || changes.games || changes.bets || changes.individualProps || changes.h2hBets || changes.teamMatches || changes.drinks || changes.expenses) {
+      // Save to Firebase (debounced to avoid hammering Firestore) — never for guests
+      if (!isGuestWrite && (changes.scores || changes.players || changes.games || changes.bets || changes.individualProps || changes.h2hBets || changes.teamMatches || changes.drinks || changes.expenses)) {
         clearTimeout(saveTimer.current);
+        setSaveStatus("saving");
         saveTimer.current = setTimeout(function() {
           firebaseSave({
             players: next.players,
@@ -673,6 +778,11 @@ export default function App() {
             teamMatches: next.teamMatches,
             drinks: next.drinks,
             expenses: next.expenses,
+          }).then(function() {
+            setSaveStatus("saved");
+            setTimeout(function() { setSaveStatus("idle"); }, 1500);
+          }).catch(function() {
+            setSaveStatus("error");
           });
         }, 500);
       }
@@ -704,16 +814,17 @@ export default function App() {
     </div>
   );
 
-  if (!auth.authed) return (<PinScreen onSuccess={handlePinSuccess} />);
-  if (!auth.playerId) return (<PlayerSelectScreen players={state.players} onSelect={handlePlayerSelect} />);
+  if (!auth.authed) return (<PinScreen onSuccess={handlePinSuccess} onGuest={handleGuest} />);
+  if (!auth.playerId && !auth.guest) return (<PlayerSelectScreen players={state.players} onSelect={handlePlayerSelect} />);
 
-  var currentPlayer = state.players.find(function(p) { return p.id === auth.playerId; });
+  var isGuest = auth.guest === true;
+  var currentPlayer = isGuest ? null : state.players.find(function(p) { return p.id === auth.playerId; });
 
   var p = state, players = p.players, scores = p.scores, games = p.games, bets = p.bets;
   var customBets = p.customBets, drinks = p.drinks, activeTab = p.activeTab;
   var selectedRound = p.selectedRound, addingGame = p.addingGame;
-  var lb = getLeaderboard(players, scores);
-  var rs = function(pid, ri) { return getRoundScore(scores, pid, ri); };
+  var lb = useMemo(function() { return getLeaderboard(players, scores); }, [players, scores]);
+  var rs = useCallback(function(pid, ri) { return getRoundScore(scores, pid, ri); }, [scores]);
 
   var TABS = [
     { id:"home", icon:"🏠", label:"Home" },
@@ -729,19 +840,37 @@ export default function App() {
     <div style={S.app}>
       <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 16px", background:CL.card, borderBottom:"1px solid "+CL.border}}>
         <div style={{display:"flex", alignItems:"center", gap:8}}>
-          <span style={{fontSize:16}}>{currentPlayer ? currentPlayer.emoji : "⛳"}</span>
+          <span style={{fontSize:16}}>{currentPlayer ? currentPlayer.emoji : "👁️"}</span>
           <span style={{fontSize:12, color:"#fff", fontFamily:"system-ui", fontWeight:600}}>{currentPlayer ? currentPlayer.name : "Guest"}</span>
+          {isGuest && <span style={{fontSize:10, color:CL.muted, fontFamily:"system-ui", background:"rgba(111,172,255,0.15)", padding:"2px 8px", borderRadius:10}}>view only</span>}
+          {!isGuest && saveStatus === "saving" && <span style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>● saving…</span>}
+          {!isGuest && saveStatus === "saved" && <span style={{fontSize:10, color:"#22c55e", fontFamily:"system-ui"}}>✓ saved</span>}
+          {!isGuest && saveStatus === "error" && <span style={{fontSize:10, color:CL.red, fontFamily:"system-ui"}}>⚠ not saved</span>}
         </div>
-        <button onClick={handleLogout} style={{fontSize:10, color:CL.muted, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:4, padding:"4px 8px", cursor:"pointer"}}>Switch</button>
+        <button onClick={handleLogout} style={{fontSize:10, color:CL.muted, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:4, padding:"4px 8px", cursor:"pointer"}}>{isGuest ? "Sign In" : "Switch"}</button>
       </div>
       <div style={S.content}>
-        {activeTab === "home" && <HomeTab players={players} lb={lb} currentPlayer={currentPlayer} weatherCache={state.weatherCache} update={update} />}
-        {activeTab === "itinerary" && <ItineraryTab weatherCache={state.weatherCache} update={update} />}
-        {activeTab === "scores" && <ScoresTab players={players} scores={scores} sel={selectedRound} hole={scoringHole} setHole={setScoringHole} update={update} rs={rs} currentPlayer={currentPlayer} />}
+        {activeTab === "home" && <HomeTab players={players} lb={lb} currentPlayer={currentPlayer} weatherCache={state.weatherCache} update={update} isGuest={isGuest} />}
+        {activeTab === "itinerary" && <ItineraryTab weatherCache={state.weatherCache} update={update} isGuest={isGuest} />}
+        {activeTab === "scores" && <ScoresTab players={players} scores={scores} sel={selectedRound} hole={scoringHole} setHole={setScoringHole} update={update} rs={rs} currentPlayer={currentPlayer} isGuest={isGuest} />}
         {activeTab === "leaderboard" && <LeaderboardTab players={players} scores={scores} lb={lb} rs={rs} currentPlayer={currentPlayer} />}
-        {activeTab === "bets" && <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} />}
-        {activeTab === "expenses" && <ExpensesTab players={players} expenses={state.expenses || []} update={update} />}
-        {activeTab === "chat" && <ChatTab currentPlayer={currentPlayer} players={players} />}
+        {activeTab === "bets" && (isGuest ? (
+          <div style={{padding:"60px 24px", textAlign:"center"}}>
+            <div style={{fontSize:48, marginBottom:16}}>🔒</div>
+            <div style={{fontSize:18, fontWeight:700, color:"#fff", fontFamily:"system-ui", marginBottom:8}}>Players Only</div>
+            <div style={{fontSize:14, color:CL.muted, fontFamily:"system-ui", marginBottom:20}}>Sign in with the group passcode to view bets and games.</div>
+            <button onClick={handleLogout} style={Object.assign({}, S.primaryBtn, {width:"auto", padding:"12px 32px"})}>Sign In</button>
+          </div>
+        ) : <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} isGuest={isGuest} />)}
+        {activeTab === "expenses" && (isGuest ? (
+          <div style={{padding:"60px 24px", textAlign:"center"}}>
+            <div style={{fontSize:48, marginBottom:16}}>🔒</div>
+            <div style={{fontSize:18, fontWeight:700, color:"#fff", fontFamily:"system-ui", marginBottom:8}}>Players Only</div>
+            <div style={{fontSize:14, color:CL.muted, fontFamily:"system-ui", marginBottom:20}}>Sign in with the group passcode to view and track expenses.</div>
+            <button onClick={handleLogout} style={Object.assign({}, S.primaryBtn, {width:"auto", padding:"12px 32px"})}>Sign In</button>
+          </div>
+        ) : <ExpensesTab players={players} expenses={state.expenses || []} update={update} isGuest={isGuest} />)}
+        {activeTab === "chat" && <ChatTab currentPlayer={currentPlayer} players={players} isGuest={isGuest} />}
       </div>
       <nav style={S.nav}>
         {TABS.map(function(t) {
@@ -1295,6 +1424,7 @@ function ScoresTab(props) {
   var se = useState(null); var scanErr = se[0], setScanErr = se[1];
 
   function setScore(pid, h, val) {
+    if (props.isGuest) return;
     var ns = JSON.parse(JSON.stringify(scores));
     if (!ns[pid]) ns[pid] = {};
     if (!ns[pid][sel]) ns[pid][sel] = Array(18).fill(null);
@@ -1303,6 +1433,7 @@ function ScoresTab(props) {
   }
 
   function bulkSet(pid, arr) {
+    if (props.isGuest) return;
     var ns = JSON.parse(JSON.stringify(scores));
     if (!ns[pid]) ns[pid] = {};
     ns[pid][sel] = arr.slice(0,18).map(function(s) { return s > 0 ? s : null; });
@@ -1464,7 +1595,7 @@ function ScoresTab(props) {
                 var bg = filled && hp && val<=hp-2 ? "rgba(37,99,235,0.5)" : filled && hp && val<hp ? "rgba(34,197,94,0.4)" : filled && hp && val>=hp+2 ? "rgba(220,38,38,0.35)" : filled && hp && val>hp ? "rgba(220,38,38,0.15)" : filled ? S.holeFilled.background : S.holeBtn.background;
                 var bc = filled && hp && val<=hp-2 ? CL.blue : filled && hp && val<hp ? "#22c55e" : filled && hp && val>=hp+2 ? CL.red : filled ? CL.blue : CL.border;
                 return (
-                  <button key={h} onClick={function() { setHole({playerId:player.id, hole:h}); }} style={Object.assign({}, S.holeBtn, {background:bg, borderColor:bc})}>
+                  <button key={h} onClick={function() { if (!props.isGuest) setHole({playerId:player.id, hole:h}); }} style={Object.assign({}, S.holeBtn, {background:bg, borderColor:bc})}>
                     <div style={{fontSize:7, color:getsStroke ? CL.blue : CL.muted, fontFamily:"system-ui", fontWeight:getsStroke ? 700 : 400}}>{getsStroke ? "●"+(h+1) : h+1}</div>
                     <div style={{fontSize:14, color:"#fff", fontWeight:700}}>{val != null ? val : "·"}</div>
                   </button>
@@ -1561,7 +1692,7 @@ function LeaderboardTab(props) {
   var aIds = resolveTeam(matchup.teamA, players);
   var bIds = resolveTeam(matchup.teamB, players);
 
-  var views = [{id:"individual", label:"Individual"}, {id:"teams", label:matchup.name}];
+  var views = [{id:"individual", label:"Individual"}, {id:"teams", label:matchup.name}, {id:"stableford", label:"🏆 Stableford"}];
 
   return (
     <div>
@@ -1664,6 +1795,86 @@ function LeaderboardTab(props) {
           })}
         </div>
       )}
+
+      {view === "stableford" && (function() {
+        var aTotal = getTeamTotalStableford(scores, players, aIds, null);
+        var bTotal = getTeamTotalStableford(scores, players, bIds, null);
+        var aLead = aTotal > bTotal, bLead = bTotal > aTotal;
+        // Individual stableford leaderboard
+        var indiv = players.map(function(p) {
+          return { p:p, pts:getTotalStableford(scores, p.id, p.handicap) };
+        }).filter(function(x) { return x.pts !== null; }).sort(function(a,b) { return b.pts - a.pts; });
+        var anyScores = indiv.length > 0;
+        return (
+          <div>
+            {/* Team Stableford matchup */}
+            <div style={S.card}>
+              <div style={S.cardTitle}>🏆 Team Stableford</div>
+              <div style={Object.assign({}, S.label, {marginBottom:12})}>Net Stableford points — more is better. All 4 scores count each round.</div>
+              <div style={{display:"flex", gap:8, alignItems:"stretch"}}>
+                <div style={Object.assign({}, S.teamBox, aLead ? S.teamBoxWin : {}, {textAlign:"center"})}>
+                  <div style={{fontSize:24, marginBottom:2}}>{matchup.teamA.emoji}</div>
+                  <div style={{fontSize:13, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{matchup.teamA.name}</div>
+                  <div style={{fontSize:30, fontWeight:700, color:aLead?"#22c55e":"#fff", fontFamily:"system-ui", marginTop:4}}>{aTotal}</div>
+                  <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui"}}>points</div>
+                </div>
+                <div style={{display:"flex", alignItems:"center", color:CL.muted, fontWeight:700, fontFamily:"system-ui", fontSize:14}}>vs</div>
+                <div style={Object.assign({}, S.teamBox, bLead ? S.teamBoxWin : {}, {textAlign:"center"})}>
+                  <div style={{fontSize:24, marginBottom:2}}>{matchup.teamB.emoji}</div>
+                  <div style={{fontSize:13, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{matchup.teamB.name}</div>
+                  <div style={{fontSize:30, fontWeight:700, color:bLead?"#22c55e":"#fff", fontFamily:"system-ui", marginTop:4}}>{bTotal}</div>
+                  <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui"}}>points</div>
+                </div>
+              </div>
+              {anyScores && <div style={{textAlign:"center", marginTop:12, fontSize:14, fontWeight:600, color:aLead||bLead?"#22c55e":CL.muted, fontFamily:"system-ui"}}>
+                {aTotal===bTotal ? "All square" : (aLead?matchup.teamA.name:matchup.teamB.name)+" lead by "+Math.abs(aTotal-bTotal)}
+              </div>}
+            </div>
+
+            {/* Per-round team breakdown */}
+            <div style={S.card}>
+              <div style={S.cardTitle}>By Round</div>
+              <div style={{display:"flex", padding:"6px 0", borderBottom:"1px solid "+CL.border, marginBottom:4}}>
+                <div style={{flex:1, fontSize:12, color:CL.muted, fontFamily:"system-ui", fontWeight:600}}>Course</div>
+                <div style={{width:60, textAlign:"center", fontSize:12, color:CL.muted, fontFamily:"system-ui", fontWeight:600}}>{matchup.teamA.emoji}</div>
+                <div style={{width:60, textAlign:"center", fontSize:12, color:CL.muted, fontFamily:"system-ui", fontWeight:600}}>{matchup.teamB.emoji}</div>
+              </div>
+              {COURSES.map(function(c, ri) {
+                var a = getTeamRoundStableford(scores, players, aIds, ri, null);
+                var b = getTeamRoundStableford(scores, players, bIds, ri, null);
+                if (a === null && b === null) return null;
+                var aw = (a||0) > (b||0), bw = (b||0) > (a||0);
+                return (
+                  <div key={ri} style={{display:"flex", alignItems:"center", padding:"8px 0", borderBottom:ri<COURSES.length-1?"1px solid "+CL.border:"none"}}>
+                    <div style={{flex:1, fontSize:13, color:"#fff", fontFamily:"system-ui"}}>{COURSE_LABELS[ri]}</div>
+                    <div style={{width:60, textAlign:"center", fontSize:15, fontWeight:700, color:aw?"#22c55e":"#fff", fontFamily:"system-ui"}}>{a===null?"–":a}</div>
+                    <div style={{width:60, textAlign:"center", fontSize:15, fontWeight:700, color:bw?"#22c55e":"#fff", fontFamily:"system-ui"}}>{b===null?"–":b}</div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Individual Stableford leaderboard */}
+            <div style={S.card}>
+              <div style={S.cardTitle}>Individual Stableford</div>
+              {!anyScores ? <div style={{textAlign:"center", color:CL.muted, padding:16, fontSize:14, fontFamily:"system-ui"}}>No scores yet.</div> :
+                indiv.map(function(x, i) {
+                  var onA = aIds.indexOf(x.p.id) >= 0;
+                  return (
+                    <div key={x.p.id} style={Object.assign({display:"flex", alignItems:"center", padding:"10px 0", gap:10}, i<indiv.length-1?S.separator:{}, i===0?{background:"rgba(34,197,94,0.08)", margin:"0 -8px", padding:"10px 8px", borderRadius:6}:{})}>
+                      <div style={{width:24, fontSize:14, fontWeight:700, color:i===0?"#22c55e":CL.muted, fontFamily:"system-ui"}}>{i+1}</div>
+                      <div style={{fontSize:16}}>{onA?matchup.teamA.emoji:matchup.teamB.emoji}</div>
+                      <div style={{flex:1, fontSize:15, color:"#fff", fontFamily:"system-ui"}}>{x.p.name}</div>
+                      <div style={{fontSize:17, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{x.pts}</div>
+                    </div>
+                  );
+                })
+              }
+              <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginTop:8, textAlign:"center"}}>Eagle 4 · Birdie 3 · Par 2 · Bogey 1 · Double+ 0 (net of handicap)</div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -1738,12 +1949,12 @@ function BetsTab(props) {
       var won = (m.winner === "a" && isTeamA) || (m.winner === "b" && !isTeamA);
       total += won ? m.stake : -m.stake;
     });
-    // Add expense balances
+    // Add expense balances — net = what you paid minus your share
     expenses.forEach(function(exp) {
       if (!exp.payer || !exp.splitAmong || exp.splitAmong.length === 0) return;
       var perPerson = exp.amount / exp.splitAmong.length;
-      if (pid === exp.payer) total += exp.amount - perPerson;
-      else if (exp.splitAmong.indexOf(pid) >= 0) total -= perPerson;
+      if (pid === exp.payer) total += exp.amount;
+      if (exp.splitAmong.indexOf(pid) >= 0) total -= perPerson;
     });
     return total;
   }
@@ -1791,6 +2002,73 @@ function BetsTab(props) {
       <div style={S.pageHeader}><div style={S.pageTitle}>Bets & Games</div></div>
       <div style={{display:"flex", gap:4, padding:"0 16px", marginBottom:8}}>
         {subTabs.map(function(t) { return <button key={t.id} onClick={function() { setTab(t.id); }} style={Object.assign({}, S.subTab, tab===t.id ? S.subTabOn : S.subTabOff)}>{t.label}</button>; })}
+      </div>
+
+      {/* Betting summary — net position per player (excludes expenses) */}
+      <div style={S.card}>
+        <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8}}>
+          <div style={S.cardTitle}>💰 Betting Summary</div>
+        </div>
+        {(function() {
+          // Calculate net betting position per player (NO expenses — those are on Spend tab)
+          function betNet(pid) {
+            var total = games.reduce(function(t,g) { return t+((g.results && g.results[pid])||0); }, 0);
+            var matchupP = TEAM_MATCHUPS[0];
+            bets.forEach(function(b) {
+              if (!b.settled || !b.winner || !b.buyin) return;
+              var winIds = [];
+              if (b.winner === "teamA") winIds = resolveTeam(matchupP.teamA, players);
+              else if (b.winner === "teamB") winIds = resolveTeam(matchupP.teamB, players);
+              else winIds = [b.winner];
+              if (winIds.length === 0) return;
+              var loseCount = players.length - winIds.length;
+              if (winIds.indexOf(pid) >= 0) total += (b.buyin * loseCount) / winIds.length;
+              else total -= b.buyin;
+            });
+            individualProps.forEach(function(prop) {
+              if (!prop.settled || !prop.winner) return;
+              var buyin = prop.buyin || 10;
+              if (pid === prop.winner) total += buyin * (players.length - 1);
+              else total -= buyin;
+            });
+            h2hBets.forEach(function(b) {
+              if (!b.settled) return;
+              var sA = b.sideA || [b.bettor];
+              var sB = b.sideB || [b.opponent];
+              var winSide = b.winningSide === "a" ? sA : sB;
+              var loseSide = b.winningSide === "a" ? sB : sA;
+              if (winSide.length === 0) return;
+              var loseTotal = loseSide.length * b.stake;
+              var winEach = loseTotal / winSide.length;
+              if (loseSide.indexOf(pid) >= 0) total -= b.stake;
+              if (winSide.indexOf(pid) >= 0) total += winEach;
+            });
+            var myTeamIds = resolveTeam(TEAM_MATCHUPS[0].teamA, players);
+            var isTeamA = myTeamIds.indexOf(pid) >= 0;
+            teamMatches.forEach(function(m) {
+              if (!m.settled || !m.winner) return;
+              var won = (m.winner === "a" && isTeamA) || (m.winner === "b" && !isTeamA);
+              total += won ? m.stake : -m.stake;
+            });
+            return total;
+          }
+          var anySettled = bets.some(function(b){return b.settled;}) || individualProps.some(function(p){return p.settled;}) || h2hBets.some(function(b){return b.settled;}) || teamMatches.some(function(m){return m.settled;}) || games.length > 0;
+          if (!anySettled) return <div style={{fontSize:14, color:CL.muted, fontFamily:"system-ui", textAlign:"center", padding:8}}>No settled bets yet. Positions update as bets are settled.</div>;
+          // Compute each player's net once, then sort — avoids recomputing betNet in the sort comparator.
+          var sorted = players.map(function(p) { return { p:p, net:betNet(p.id) }; }).sort(function(a,b) { return b.net - a.net; });
+          return sorted.map(function(row, i) {
+            var p = row.p, net = row.net;
+            var color = net > 0.01 ? "#22c55e" : net < -0.01 ? CL.red : CL.muted;
+            return (
+              <div key={p.id} style={Object.assign({display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 0"}, i < sorted.length-1 ? S.separator : {})}>
+                <div style={{fontSize:15, color:"#fff", fontFamily:"system-ui"}}>{p.emoji+" "+p.name}</div>
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontSize:16, fontWeight:700, color:color, fontFamily:"system-ui"}}>{(net >= 0 ? "+$" : "-$")+Math.abs(net).toFixed(2)}</div>
+                </div>
+              </div>
+            );
+          });
+        })()}
       </div>
 
       {tab === "props" && (
@@ -1952,6 +2230,8 @@ function BetsTab(props) {
                   var nb = Object.assign({}, b);
                   nb.sideA = (nb.sideA || [nb.bettor]).slice();
                   nb.sideB = (nb.sideB || [nb.opponent]).slice();
+                  // Guard: never add a player who's already on either side
+                  if (nb.sideA.indexOf(pid) >= 0 || nb.sideB.indexOf(pid) >= 0) return nb;
                   if (side === "a") nb.sideA.push(pid);
                   else nb.sideB.push(pid);
                   return nb;
@@ -2293,9 +2573,11 @@ function ExpensesTab(props) {
     expenses.forEach(function(exp) {
       if (!exp.payer || !exp.splitAmong || exp.splitAmong.length === 0) return;
       var perPerson = exp.amount / exp.splitAmong.length;
-      bal[exp.payer] = (bal[exp.payer] || 0) + exp.amount - perPerson;
+      // Payer credited full amount paid
+      bal[exp.payer] = (bal[exp.payer] || 0) + exp.amount;
+      // Everyone in the split debited their share
       exp.splitAmong.forEach(function(pid) {
-        if (pid !== exp.payer) bal[pid] = (bal[pid] || 0) - perPerson;
+        bal[pid] = (bal[pid] || 0) - perPerson;
       });
     });
     return bal;
@@ -2335,7 +2617,7 @@ function ExpensesTab(props) {
     <div>
       <div style={S.pageHeader}>
         <div style={S.pageTitle}>Trip Expenses</div>
-        <button onClick={function() { setAdding(!adding); }} style={Object.assign({}, S.addBtn, {fontSize:14})}>{adding ? "Cancel" : "+ Add"}</button>
+        {!props.isGuest && <button onClick={function() { setAdding(!adding); }} style={Object.assign({}, S.addBtn, {fontSize:14})}>{adding ? "Cancel" : "+ Add"}</button>}
       </div>
 
       {/* Summary card */}
@@ -2458,7 +2740,7 @@ function ExpensesTab(props) {
                   </div>
                   <div style={{textAlign:"right", flexShrink:0}}>
                     <div style={{fontSize:17, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{"$"+exp.amount.toFixed(2)}</div>
-                    <button onClick={function() { if (confirm("Delete this expense?")) update({expenses:expenses.filter(function(e) { return e.id!==exp.id; })}); }} style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:12, marginTop:2}}>✕ delete</button>
+                    {!props.isGuest && <button onClick={function() { if (confirm("Delete this expense?")) update({expenses:expenses.filter(function(e) { return e.id!==exp.id; })}); }} style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:12, marginTop:2}}>✕ delete</button>}
                   </div>
                 </div>
               </div>
@@ -2487,7 +2769,7 @@ function ChatTab(props) {
   }, []);
 
   function handleSend() {
-    if (!text.trim() || !currentPlayer) return;
+    if (props.isGuest || !text.trim() || !currentPlayer) return;
     sendChatMessage({
       playerId: currentPlayer.id,
       playerName: currentPlayer.name,
@@ -2499,6 +2781,7 @@ function ChatTab(props) {
   }
 
   function handleDelete(msgId) {
+    if (props.isGuest) return;
     deleteChatMessage(msgId);
   }
 
@@ -2529,21 +2812,25 @@ function ChatTab(props) {
       )}
 
       {/* Message input */}
-      <div style={{padding:"0 16px", marginBottom:8}}>
-        <div style={{display:"flex", gap:8}}>
-          <input
-            style={Object.assign({}, S.input, {flex:1, margin:0, borderRadius:20, paddingLeft:16})}
-            value={text}
-            onChange={function(e) { setText(e.target.value); }}
-            onKeyDown={function(e) { if (e.key === "Enter") handleSend(); }}
-            placeholder={currentPlayer ? "Message the group..." : "Select a player first"}
-            disabled={!currentPlayer}
-          />
-          <button onClick={handleSend} disabled={!text.trim()} style={Object.assign({}, S.addBtn, {borderRadius:20, padding:"10px 16px", opacity:!text.trim() ? 0.5 : 1})}>
-            Send
-          </button>
+      {props.isGuest ? (
+        <div style={{padding:"12px 16px", textAlign:"center"}}><div style={{fontSize:13, color:CL.muted, fontFamily:"system-ui"}}>👁️ Guest view — sign in to send messages</div></div>
+      ) : (
+        <div style={{padding:"0 16px", marginBottom:8}}>
+          <div style={{display:"flex", gap:8}}>
+            <input
+              style={Object.assign({}, S.input, {flex:1, margin:0, borderRadius:20, paddingLeft:16})}
+              value={text}
+              onChange={function(e) { setText(e.target.value); }}
+              onKeyDown={function(e) { if (e.key === "Enter") handleSend(); }}
+              placeholder={currentPlayer ? "Message the group..." : "Select a player first"}
+              disabled={!currentPlayer}
+            />
+            <button onClick={handleSend} disabled={!text.trim()} style={Object.assign({}, S.addBtn, {borderRadius:20, padding:"10px 16px", opacity:!text.trim() ? 0.5 : 1})}>
+              Send
+            </button>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Messages */}
       <div style={S.card}>
