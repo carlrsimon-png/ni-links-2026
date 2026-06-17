@@ -1446,6 +1446,14 @@ function ScoresTab(props) {
     setScanData(null); setScanning(false);
   }
 
+  function clearRound(pid) {
+    if (props.isGuest) return;
+    var ns = JSON.parse(JSON.stringify(scores));
+    if (!ns[pid]) ns[pid] = {};
+    ns[pid][sel] = Array(18).fill(null);
+    update({ scores:ns });
+  }
+
   function handlePhoto(e) {
     var file = e.target.files && e.target.files[0];
     if (!file) return;
@@ -1629,7 +1637,10 @@ function ScoresTab(props) {
         return (
           <div key={player.id} style={S.card}>
             <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4}}>
-              <span style={{fontSize:16, fontWeight:600, color:"#fff"}}>{player.emoji+" "+player.name}</span>
+              <div style={{display:"flex", alignItems:"center", gap:8}}>
+                <span style={{fontSize:16, fontWeight:600, color:"#fff"}}>{player.emoji+" "+player.name}</span>
+                {!props.isGuest && gross !== null && <button onClick={function() { if (confirm("Clear all scores for "+player.name+" on "+COURSE_LABELS[sel]+"?")) clearRound(player.id); }} style={{fontSize:10, color:CL.muted, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:4, padding:"2px 8px", cursor:"pointer"}}>Clear</button>}
+              </div>
               <div style={{display:"flex", gap:10, alignItems:"center"}}>
                 <div style={{textAlign:"center"}}>
                   <div style={{fontSize:9, color:CL.muted, fontFamily:"system-ui"}}>GROSS</div>
