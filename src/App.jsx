@@ -1959,13 +1959,14 @@ function LeaderboardTab(props) {
 // ─── BETS & GAMES ────────────────────────────────────────────────────
 function BetsTab(props) {
   var players = props.players, games = props.games, bets = props.bets;
+  var scores = props.scores || {};
   var customBets = props.customBets, h2hBets = props.h2hBets || [], drinks = props.drinks || {};
   var teamMatches = props.teamMatches || DEFAULT_TEAM_MATCHES;
   var individualProps = props.individualProps || DEFAULT_INDIVIDUAL_PROPS;
   var expenses = props.expenses || [];
   var addingGame = props.addingGame, update = props.update, resetAll = props.resetAll;
 
-  var ts = useState("props"); var tab = ts[0], setTab = ts[1];
+  var ts = useState("stableford"); var tab = ts[0], setTab = ts[1];
   var gts = useState("skins"); var gameType = gts[0], setGameType = gts[1];
   var sks = useState("5"); var stake = sks[0], setStake = sks[1];
   var rds = useState(0); var round = rds[0], setRound = rds[1];
@@ -2075,7 +2076,7 @@ function BetsTab(props) {
     setPName(""); setPHcp(""); setPEmoji("🔴"); setEditId(null);
   }
 
-  var subTabs = [{id:"props",label:"🎯 Props"},{id:"match",label:"⚔️ Teams"},{id:"h2h",label:"🤝 H2H"},{id:"games",label:"Games"},{id:"settle",label:"💸 Settle"},{id:"drinks",label:"🍺"},{id:"players",label:"👥"}];
+  var subTabs = [{id:"stableford",label:"🏆 Stableford"},{id:"props",label:"🎯 Props"},{id:"match",label:"⚔️ Teams"},{id:"h2h",label:"🤝 H2H"},{id:"games",label:"Games"},{id:"settle",label:"💸 Settle"},{id:"drinks",label:"🍺"},{id:"players",label:"👥"}];
 
   return (
     <div>
@@ -2084,7 +2085,8 @@ function BetsTab(props) {
         {subTabs.map(function(t) { return <button key={t.id} onClick={function() { setTab(t.id); }} style={Object.assign({}, S.subTab, tab===t.id ? S.subTabOn : S.subTabOff)}>{t.label}</button>; })}
       </div>
 
-      {/* Betting summary — net position per player (excludes expenses) */}
+      {/* Betting summary — net position per player (excludes expenses). Hidden on Stableford tab. */}
+      {tab !== "stableford" && (
       <div style={S.card}>
         <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8}}>
           <div style={S.cardTitle}>💰 Betting Summary</div>
@@ -2150,6 +2152,98 @@ function BetsTab(props) {
           });
         })()}
       </div>
+      )}
+
+      {tab === "stableford" && (function() {
+        var matchup = TEAM_MATCHUPS[0];
+        var aIds = resolveTeam(matchup.teamA, players);
+        var bIds = resolveTeam(matchup.teamB, players);
+        var aTotal = getTeamTotalStableford(scores, players, aIds, null);
+        var bTotal = getTeamTotalStableford(scores, players, bIds, null);
+        var aLead = aTotal > bTotal, bLead = bTotal > aTotal;
+        var indiv = players.map(function(p) {
+          return { p:p, pts:getTotalStableford(scores, p.id, p.handicap) };
+        }).filter(function(x) { return x.pts !== null; }).sort(function(a,b) { return b.pts - a.pts; });
+        var anyScores = indiv.length > 0;
+        return (
+          <div>
+            {/* Team Stableford matchup — the main event */}
+            <div style={S.card}>
+              <div style={S.cardTitle}>🏆 Team Stableford — The Main Event</div>
+              <div style={Object.assign({}, S.label, {marginBottom:12})}>Net Stableford points across all 5 rounds. All 4 scores count each round. More points wins.</div>
+              <div style={{display:"flex", gap:8, alignItems:"stretch"}}>
+                <div style={Object.assign({}, S.teamBox, aLead ? S.teamBoxWin : {}, {textAlign:"center"})}>
+                  <div style={{fontSize:24, marginBottom:2}}>{matchup.teamA.emoji}</div>
+                  <div style={{fontSize:13, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{matchup.teamA.name}</div>
+                  <div style={{fontSize:34, fontWeight:700, color:aLead?"#22c55e":"#fff", fontFamily:"system-ui", marginTop:4}}>{aTotal}</div>
+                  <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui"}}>points</div>
+                </div>
+                <div style={{display:"flex", alignItems:"center", color:CL.muted, fontWeight:700, fontFamily:"system-ui", fontSize:14}}>vs</div>
+                <div style={Object.assign({}, S.teamBox, bLead ? S.teamBoxWin : {}, {textAlign:"center"})}>
+                  <div style={{fontSize:24, marginBottom:2}}>{matchup.teamB.emoji}</div>
+                  <div style={{fontSize:13, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{matchup.teamB.name}</div>
+                  <div style={{fontSize:34, fontWeight:700, color:bLead?"#22c55e":"#fff", fontFamily:"system-ui", marginTop:4}}>{bTotal}</div>
+                  <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui"}}>points</div>
+                </div>
+              </div>
+              {anyScores && <div style={{textAlign:"center", marginTop:12, fontSize:15, fontWeight:700, color:aLead||bLead?"#22c55e":CL.muted, fontFamily:"system-ui"}}>
+                {aTotal===bTotal ? "All square" : (aLead?matchup.teamA.name:matchup.teamB.name)+" lead by "+Math.abs(aTotal-bTotal)}
+              </div>}
+              {!anyScores && <div style={{textAlign:"center", marginTop:12, fontSize:13, color:CL.muted, fontFamily:"system-ui"}}>Enter scores to start the competition.</div>}
+            </div>
+
+            {/* Per-round team breakdown */}
+            <div style={S.card}>
+              <div style={S.cardTitle}>By Round</div>
+              <div style={{display:"flex", padding:"6px 0", borderBottom:"1px solid "+CL.border, marginBottom:4}}>
+                <div style={{flex:1, fontSize:12, color:CL.muted, fontFamily:"system-ui", fontWeight:600}}>Course</div>
+                <div style={{width:60, textAlign:"center", fontSize:12, color:CL.muted, fontFamily:"system-ui", fontWeight:600}}>{matchup.teamA.emoji}</div>
+                <div style={{width:60, textAlign:"center", fontSize:12, color:CL.muted, fontFamily:"system-ui", fontWeight:600}}>{matchup.teamB.emoji}</div>
+              </div>
+              {COURSES.map(function(c, ri) {
+                var a = getTeamRoundStableford(scores, players, aIds, ri, null);
+                var b = getTeamRoundStableford(scores, players, bIds, ri, null);
+                if (a === null && b === null) {
+                  return (
+                    <div key={ri} style={{display:"flex", alignItems:"center", padding:"8px 0", borderBottom:ri<COURSES.length-1?"1px solid "+CL.border:"none", opacity:0.5}}>
+                      <div style={{flex:1, fontSize:13, color:CL.muted, fontFamily:"system-ui"}}>{COURSE_LABELS[ri]}</div>
+                      <div style={{width:60, textAlign:"center", fontSize:15, color:CL.muted, fontFamily:"system-ui"}}>–</div>
+                      <div style={{width:60, textAlign:"center", fontSize:15, color:CL.muted, fontFamily:"system-ui"}}>–</div>
+                    </div>
+                  );
+                }
+                var aw = (a||0) > (b||0), bw = (b||0) > (a||0);
+                return (
+                  <div key={ri} style={{display:"flex", alignItems:"center", padding:"8px 0", borderBottom:ri<COURSES.length-1?"1px solid "+CL.border:"none"}}>
+                    <div style={{flex:1, fontSize:13, color:"#fff", fontFamily:"system-ui"}}>{COURSE_LABELS[ri]}</div>
+                    <div style={{width:60, textAlign:"center", fontSize:15, fontWeight:700, color:aw?"#22c55e":"#fff", fontFamily:"system-ui"}}>{a===null?"–":a}</div>
+                    <div style={{width:60, textAlign:"center", fontSize:15, fontWeight:700, color:bw?"#22c55e":"#fff", fontFamily:"system-ui"}}>{b===null?"–":b}</div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Individual Stableford leaderboard */}
+            <div style={S.card}>
+              <div style={S.cardTitle}>Individual Stableford</div>
+              {!anyScores ? <div style={{textAlign:"center", color:CL.muted, padding:16, fontSize:14, fontFamily:"system-ui"}}>No scores yet.</div> :
+                indiv.map(function(x, i) {
+                  var onA = aIds.indexOf(x.p.id) >= 0;
+                  return (
+                    <div key={x.p.id} style={Object.assign({display:"flex", alignItems:"center", padding:"10px 0", gap:10}, i<indiv.length-1?S.separator:{}, i===0?{background:"rgba(34,197,94,0.08)", margin:"0 -8px", padding:"10px 8px", borderRadius:6}:{})}>
+                      <div style={{width:24, fontSize:14, fontWeight:700, color:i===0?"#22c55e":CL.muted, fontFamily:"system-ui"}}>{i+1}</div>
+                      <div style={{fontSize:16}}>{onA?matchup.teamA.emoji:matchup.teamB.emoji}</div>
+                      <div style={{flex:1, fontSize:15, color:"#fff", fontFamily:"system-ui"}}>{x.p.name}</div>
+                      <div style={{fontSize:17, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{x.pts}</div>
+                    </div>
+                  );
+                })
+              }
+              <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginTop:8, textAlign:"center"}}>Eagle 4 · Birdie 3 · Par 2 · Bogey 1 · Double+ 0 (net of handicap)</div>
+            </div>
+          </div>
+        );
+      })()}
 
       {tab === "props" && (
         <div>
