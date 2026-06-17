@@ -107,6 +107,12 @@ const DEFAULT_PROPS = [
 
 // Individual prop bets — winner takes the pot ($10/player buy-in)
 const DEFAULT_INDIVIDUAL_PROPS = [
+  { id:"ip8", name:"Most Stableford Points (Trip)", desc:"Highest total Stableford points across all 5 rounds", settled:false, winner:null, buyin:10 },
+  { id:"ipsf0", name:"Most Stableford — Ardglass", desc:"Most Stableford points at Ardglass", settled:false, winner:null, buyin:10 },
+  { id:"ipsf1", name:"Most Stableford — Royal County Down", desc:"Most Stableford points at Royal County Down", settled:false, winner:null, buyin:10 },
+  { id:"ipsf2", name:"Most Stableford — Castlerock", desc:"Most Stableford points at Castlerock", settled:false, winner:null, buyin:10 },
+  { id:"ipsf3", name:"Most Stableford — Royal Portrush", desc:"Most Stableford points at Royal Portrush", settled:false, winner:null, buyin:10 },
+  { id:"ipsf4", name:"Most Stableford — Portstewart", desc:"Most Stableford points at Portstewart", settled:false, winner:null, buyin:10 },
   { id:"ip1", name:"Lowest Net Score (Trip)", desc:"Best net total across all 5 rounds", settled:false, winner:null, buyin:10 },
   { id:"ip3", name:"Most Triple Bogeys or Worse", desc:"Most holes at triple bogey (+3) or higher", settled:false, winner:null, buyin:10 },
   { id:"ip4", name:"Most Pars or Better (Trip)", desc:"Most holes played at par or under", settled:false, winner:null, buyin:10 },
@@ -2293,6 +2299,28 @@ function BetsTab(props) {
             {individualProps.map(function(prop) {
               var winner = players.find(function(x) { return x.id === prop.winner; });
               var pot = (prop.buyin || 10) * players.length;
+              // For Stableford props, compute the current leader to make settling easy.
+              var sfLeader = null;
+              if (!prop.settled) {
+                var sfScores = null;
+                if (prop.id === "ip8") {
+                  // Most Stableford overall
+                  sfScores = players.map(function(p) { return { p:p, v:getTotalStableford(scores, p.id, p.handicap) }; });
+                } else if (prop.id && prop.id.indexOf("ipsf") === 0) {
+                  // Per-round Stableford: ipsf0..ipsf4 → round index
+                  var ri = parseInt(prop.id.replace("ipsf", ""), 10);
+                  sfScores = players.map(function(p) { return { p:p, v:getRoundStableford(scores, p.id, ri, p.handicap) }; });
+                }
+                if (sfScores) {
+                  sfScores = sfScores.filter(function(x) { return x.v !== null; });
+                  if (sfScores.length) {
+                    sfScores.sort(function(a,b) { return b.v - a.v; });
+                    var top = sfScores[0];
+                    var tied = sfScores.filter(function(x) { return x.v === top.v; });
+                    sfLeader = { player: top.p, points: top.v, tied: tied.length > 1, tiedPlayers: tied };
+                  }
+                }
+              }
               return (
                 <div key={prop.id} style={Object.assign({padding:"12px 0"}, S.separator)}>
                   <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start"}}>
@@ -2300,6 +2328,7 @@ function BetsTab(props) {
                       <div style={{fontSize:15, fontWeight:600, color:prop.settled?CL.muted:"#fff", textDecoration:prop.settled?"line-through":"none"}}>{prop.name}</div>
                       {prop.desc && <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", marginTop:2}}>{prop.desc}</div>}
                       <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginTop:2}}>{"$"+(prop.buyin||10)+"/player · $"+pot+" pot"}</div>
+                      {sfLeader && <div style={{fontSize:12, color:CL.blue, fontFamily:"system-ui", marginTop:3}}>{sfLeader.tied ? "Tied at "+sfLeader.points+" pts: "+sfLeader.tiedPlayers.map(function(t){return t.player.name.split(" ")[0];}).join(", ") : "Leading: "+sfLeader.player.emoji+" "+sfLeader.player.name.split(" ")[0]+" ("+sfLeader.points+" pts)"}</div>}
                     </div>
                     {!prop.settled && <button onClick={function() { if (confirm("Delete this prop?")) update({individualProps:individualProps.filter(function(x) { return x.id!==prop.id; })}); }} style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:14, flexShrink:0}}>🗑</button>}
                   </div>
