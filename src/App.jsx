@@ -807,6 +807,14 @@ export default function App() {
     });
   };
 
+  // Derived values + hooks must come BEFORE any early return so hooks always
+  // run in the same order on every render (React rules of hooks).
+  var p = state, players = p.players, scores = p.scores, games = p.games, bets = p.bets;
+  var customBets = p.customBets, drinks = p.drinks, activeTab = p.activeTab;
+  var selectedRound = p.selectedRound, addingGame = p.addingGame;
+  var lb = useMemo(function() { return getLeaderboard(players, scores); }, [players, scores]);
+  var rs = useCallback(function(pid, ri) { return getRoundScore(scores, pid, ri); }, [scores]);
+
   if (loading || !auth.loaded) return (
     <div style={S.loading}>
       <img src="/logo.png" alt="Northern Irish Links 2026" onError={function(e){e.target.style.display="none";}} style={{width:120, height:120}} />
@@ -819,12 +827,6 @@ export default function App() {
 
   var isGuest = auth.guest === true;
   var currentPlayer = isGuest ? null : state.players.find(function(p) { return p.id === auth.playerId; });
-
-  var p = state, players = p.players, scores = p.scores, games = p.games, bets = p.bets;
-  var customBets = p.customBets, drinks = p.drinks, activeTab = p.activeTab;
-  var selectedRound = p.selectedRound, addingGame = p.addingGame;
-  var lb = useMemo(function() { return getLeaderboard(players, scores); }, [players, scores]);
-  var rs = useCallback(function(pid, ri) { return getRoundScore(scores, pid, ri); }, [scores]);
 
   var TABS = [
     { id:"home", icon:"🏠", label:"Home" },
