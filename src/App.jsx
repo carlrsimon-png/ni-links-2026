@@ -895,6 +895,72 @@ export default function App() {
 }
 
 // ─── HOME ────────────────────────────────────────────────────────────
+function FxCard() {
+  var rs = useState(null); var rate = rs[0], setRate = rs[1];
+  var es = useState(false); var err = es[0], setErr = es[1];
+
+  useEffect(function() {
+    var cancelled = false;
+    function load() {
+      // Primary: Frankfurter (free, no key, CORS-enabled).
+      fetch("https://api.frankfurter.app/latest?from=GBP&to=USD")
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (cancelled) return;
+          if (data && data.rates && data.rates.USD) {
+            setRate({ value: data.rates.USD, date: data.date });
+            setErr(false);
+          } else {
+            throw new Error("bad data");
+          }
+        })
+        .catch(function() {
+          // Fallback: open.er-api.com (also free, no key).
+          if (cancelled) return;
+          fetch("https://open.er-api.com/v6/latest/GBP")
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+              if (cancelled) return;
+              if (data && data.rates && data.rates.USD) {
+                var d = data.time_last_update_utc ? new Date(data.time_last_update_utc).toISOString().slice(0,10) : "";
+                setRate({ value: data.rates.USD, date: d });
+                setErr(false);
+              } else {
+                setErr(true);
+              }
+            })
+            .catch(function() { if (!cancelled) setErr(true); });
+        });
+    }
+    load();
+    // Refresh hourly while the app is open
+    var iv = setInterval(load, 3600000);
+    return function() { cancelled = true; clearInterval(iv); };
+  }, []);
+
+  return (
+    <div style={Object.assign({}, S.card, {display:"flex", justifyContent:"space-between", alignItems:"center"})}>
+      <div style={{display:"flex", alignItems:"center", gap:8}}>
+        <span style={{fontSize:20}}>💷</span>
+        <div>
+          <div style={{fontSize:13, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>British Pound → US Dollar</div>
+          <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui"}}>{rate ? "Updated "+rate.date : err ? "Rate unavailable" : "Loading…"}</div>
+        </div>
+      </div>
+      <div style={{textAlign:"right"}}>
+        {rate ? (
+          <div>
+            <div style={{fontSize:20, fontWeight:700, color:"#22c55e", fontFamily:"system-ui"}}>{"$"+rate.value.toFixed(4)}</div>
+            <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>per £1</div>
+          </div>
+        ) : (
+          <div style={{fontSize:14, color:CL.muted, fontFamily:"system-ui"}}>{err ? "—" : "…"}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function HomeTab(props) {
   var players = props.players, lb = props.lb;
   var ts = useState(getCountdown()); var time = ts[0], setTime = ts[1];
@@ -918,6 +984,8 @@ function HomeTab(props) {
         <div style={Object.assign({}, S.label, {marginTop:6})}>6 Nights · 5 Rounds · 8 Golfers</div>
         <div style={Object.assign({}, S.label, {marginTop:2, fontSize:10})}>PerryGolf · VIP Coach · JetBlue</div>
       </div>
+
+      {!time.past && <FxCard />}
 
       <div style={S.card}>
         <div style={S.cardTitle}>{time.past ? "🏌️ Trip Underway" : "⏱ Countdown"}</div>
