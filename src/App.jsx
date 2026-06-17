@@ -107,11 +107,9 @@ const DEFAULT_PROPS = [
 // Individual prop bets — winner takes the pot ($10/player buy-in)
 const DEFAULT_INDIVIDUAL_PROPS = [
   { id:"ip1", name:"Lowest Net Score (Trip)", desc:"Best net total across all 5 rounds", settled:false, winner:null, buyin:10 },
-  { id:"ip2", name:"Highest Net Score (Trip)", desc:"Worst net total — the wooden spoon", settled:false, winner:null, buyin:10 },
   { id:"ip3", name:"Most Triple Bogeys or Worse", desc:"Most holes at triple bogey (+3) or higher", settled:false, winner:null, buyin:10 },
   { id:"ip4", name:"Most Pars or Better (Trip)", desc:"Most holes played at par or under", settled:false, winner:null, buyin:10 },
   { id:"ip5", name:"Closest to the Pin — RCD par 3s", desc:"Best on a designated Royal County Down par 3", settled:false, winner:null, buyin:10 },
-  { id:"ip6", name:"Longest Drive — Portrush", desc:"Longest drive in the fairway at Royal Portrush", settled:false, winner:null, buyin:10 },
   { id:"ip7", name:"Best Single Round (Net)", desc:"Lowest net score in any one round", settled:false, winner:null, buyin:10 },
 ];
 
@@ -1446,20 +1444,81 @@ function ScoresTab(props) {
   function handlePhoto(e) {
     var file = e.target.files && e.target.files[0];
     if (!file) return;
+    if (props.isGuest) return;
     setScanLoading(true); setScanErr(null); setScanData(null);
 
-    // Note: AI photo scanning requires a backend API key which isn't available
-    // in the deployed app. Direct users to manual entry (tap any hole to enter scores).
-    setTimeout(function() {
+    var names = (players || []).map(function(p) { return p.name; });
+
+    // Downsize the image in-browser before upload: faster, cheaper, avoids
+    // serverless body-size limits. Max dimension 1600px keeps text readable.
+    function sendBase64(base64, mediaType) {
+      fetch("/api/scan-scorecard", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: base64, mediaType: mediaType, playerNames: names }),
+      })
+        .then(function(r) {
+          return r.json().then(function(data) { return { ok: r.ok, data: data }; });
+        })
+        .then(function(res) {
+          if (!res.ok) {
+            setScanErr((res.data && res.data.error) || "Scan failed. Try a clearer photo.");
+            setScanLoading(false);
+            return;
+          }
+          if (res.data && res.data.players && res.data.players.length) {
+            setScanData(res.data);
+          } else {
+            setScanErr("Couldn't find any scores. Try a clearer, straight-on photo.");
+          }
+          setScanLoading(false);
+        })
+        .catch(function() {
+          setScanErr("Scan failed — check your connection and try again.");
+          setScanLoading(false);
+        });
+    }
+
+    var reader = new FileReader();
+    reader.onload = function() {
+      var img = new Image();
+      img.onload = function() {
+        try {
+          var maxDim = 1600;
+          var w = img.width, h = img.height;
+          if (w > maxDim || h > maxDim) {
+            if (w >= h) { h = Math.round(h * maxDim / w); w = maxDim; }
+            else { w = Math.round(w * maxDim / h); h = maxDim; }
+          }
+          var canvas = document.createElement("canvas");
+          canvas.width = w; canvas.height = h;
+          var ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0, w, h);
+          var jpeg = canvas.toDataURL("image/jpeg", 0.85);
+          sendBase64(jpeg.split(",")[1], "image/jpeg");
+        } catch (err) {
+          // Fallback: send original if canvas fails
+          sendBase64(String(reader.result).split(",")[1], file.type || "image/jpeg");
+        }
+      };
+      img.onerror = function() {
+        setScanErr("Couldn't read that image. Try another photo.");
+        setScanLoading(false);
+      };
+      img.src = reader.result;
+    };
+    reader.onerror = function() {
+      setScanErr("Couldn't read that image file. Try another photo.");
       setScanLoading(false);
-      setScanErr("Photo scanning isn't available in the live app. Tap any hole below to enter scores manually — it's quick and works great!");
-    }, 400);
+    };
+    reader.readAsDataURL(file);
   }
 
   return (
     <div>
       <div style={S.pageHeader}>
         <div style={S.pageTitle}>Scorecard</div>
+        {!props.isGuest && <button onClick={function() { setScanning(!scanning); setScanData(null); setScanErr(null); }} style={Object.assign({}, S.addBtn, {fontSize:13})}>{scanning ? "✕ Close" : "📷 Scan"}</button>}
       </div>
 
       {scanning && (
@@ -1901,6 +1960,9 @@ function BetsTab(props) {
   var h2hP1 = useState(null); var bettor = h2hP1[0], setBettor = h2hP1[1];
   var h2hP2 = useState(null); var opponent = h2hP2[0], setOpponent = h2hP2[1];
   var h2hCrs = useState(""); var h2hCourse = h2hCrs[0], setH2hCourse = h2hCrs[1];
+  var cpName = useState(""); var customPropName = cpName[0], setCustomPropName = cpName[1];
+  var cpBuyin = useState("10"); var customPropBuyin = cpBuyin[0], setCustomPropBuyin = cpBuyin[1];
+  var cpAdding = useState(false); var addingProp = cpAdding[0], setAddingProp = cpAdding[1];
   // Player management
   var pns = useState(""); var pName = pns[0], setPName = pns[1];
   var phs = useState(""); var pHcp = phs[0], setPHcp = phs[1];
@@ -2123,10 +2185,13 @@ function BetsTab(props) {
               var pot = (prop.buyin || 10) * players.length;
               return (
                 <div key={prop.id} style={Object.assign({padding:"12px 0"}, S.separator)}>
-                  <div style={{flex:1}}>
-                    <div style={{fontSize:15, fontWeight:600, color:prop.settled?CL.muted:"#fff", textDecoration:prop.settled?"line-through":"none"}}>{prop.name}</div>
-                    {prop.desc && <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", marginTop:2}}>{prop.desc}</div>}
-                    <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginTop:2}}>{"$"+(prop.buyin||10)+"/player · $"+pot+" pot"}</div>
+                  <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start"}}>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:15, fontWeight:600, color:prop.settled?CL.muted:"#fff", textDecoration:prop.settled?"line-through":"none"}}>{prop.name}</div>
+                      {prop.desc && <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", marginTop:2}}>{prop.desc}</div>}
+                      <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginTop:2}}>{"$"+(prop.buyin||10)+"/player · $"+pot+" pot"}</div>
+                    </div>
+                    {!prop.settled && <button onClick={function() { if (confirm("Delete this prop?")) update({individualProps:individualProps.filter(function(x) { return x.id!==prop.id; })}); }} style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:14, flexShrink:0}}>🗑</button>}
                   </div>
                   {prop.settled ? (
                     <div style={{marginTop:6}}>
@@ -2143,6 +2208,28 @@ function BetsTab(props) {
                 </div>
               );
             })}
+
+            {/* Add custom prop bet */}
+            {!addingProp ? (
+              <button onClick={function() { setAddingProp(true); }} style={Object.assign({}, S.addBtn, {width:"100%", marginTop:12, fontSize:13})}>+ Add Custom Prop Bet</button>
+            ) : (
+              <div style={{marginTop:12, padding:12, background:"rgba(40,69,112,0.15)", borderRadius:8}}>
+                <div style={{fontSize:13, fontWeight:700, color:"#fff", fontFamily:"system-ui", marginBottom:8}}>New Prop Bet</div>
+                <div style={Object.assign({}, S.label, {marginBottom:4})}>What's the bet?</div>
+                <input style={S.input} value={customPropName} onChange={function(e) { setCustomPropName(e.target.value); }} placeholder="e.g. First birdie of the trip"/>
+                <div style={Object.assign({}, S.label, {marginBottom:4})}>Buy-in per player ($)</div>
+                <input style={Object.assign({}, S.input, {width:120})} value={customPropBuyin} onChange={function(e) { setCustomPropBuyin(e.target.value); }} type="number" placeholder="10"/>
+                <div style={{display:"flex", gap:8, marginTop:4}}>
+                  <button style={Object.assign({}, S.primaryBtn, {flex:1, opacity:!customPropName.trim() ? 0.5 : 1})} onClick={function() {
+                    if (!customPropName.trim()) return;
+                    var newProp = { id:"ip"+Date.now(), name:customPropName.trim(), desc:"", settled:false, winner:null, buyin:parseFloat(customPropBuyin)||10 };
+                    update({individualProps:individualProps.concat([newProp])});
+                    setCustomPropName(""); setCustomPropBuyin("10"); setAddingProp(false);
+                  }}>Create</button>
+                  <button style={Object.assign({}, S.secondaryBtn, {flex:1})} onClick={function() { setAddingProp(false); setCustomPropName(""); }}>Cancel</button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
