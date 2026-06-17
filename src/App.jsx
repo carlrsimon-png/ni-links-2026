@@ -607,9 +607,13 @@ function PinScreen(props) {
   return (
     <div style={Object.assign({}, S.loading, {padding:24})}>
       <img src="/logo.png" alt="Northern Irish Links 2026" onError={function(e){e.target.style.display="none";}} style={{width:160, height:160, marginBottom:16}} />
-      <div style={{display:"flex", justifyContent:"center", gap:6, marginBottom:24}}>
+      <div style={{display:"flex", justifyContent:"center", gap:6, marginBottom:16}}>
         {[CL.red, "#fff", CL.blue].map(function(c,i) { return <div key={i} style={{width:20, height:3, borderRadius:2, background:c}} />; })}
       </div>
+
+      <button onClick={props.onGuest} style={{marginBottom:20, background:"none", border:"1px solid "+CL.border, borderRadius:8, padding:"10px 20px", color:CL.muted, fontSize:13, fontFamily:"system-ui", cursor:"pointer"}}>
+        👁️ View as Guest
+      </button>
 
       <div style={{fontSize:14, color:CL.muted, fontFamily:"system-ui", marginBottom:20}}>Enter group passcode</div>
 
@@ -637,10 +641,6 @@ function PinScreen(props) {
           );
         })}
       </div>
-
-      <button onClick={props.onGuest} style={{marginTop:28, background:"none", border:"1px solid "+CL.border, borderRadius:8, padding:"12px 24px", color:CL.muted, fontSize:14, fontFamily:"system-ui", cursor:"pointer"}}>
-        View as Guest (read only)
-      </button>
     </div>
   );
 }
