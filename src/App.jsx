@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
+const APP_VERSION = "1.0";
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
 const AUTH_KEY = "ni-links-auth";
 const GROUP_PIN = "2026";
@@ -1013,6 +1014,10 @@ function HomeTab(props) {
       </div>
 
       <WeatherCard weatherCache={props.weatherCache} update={props.update} />
+
+      <div style={{textAlign:"center", padding:"16px 0 8px", fontSize:11, color:CL.muted, fontFamily:"system-ui"}}>
+        Northern Irish Links · v{APP_VERSION}
+      </div>
     </div>
   );
 }
