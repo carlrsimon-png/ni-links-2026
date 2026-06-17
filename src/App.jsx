@@ -703,6 +703,30 @@ export default function App() {
           var latest = DEFAULT_PLAYERS.find(function(d) { return d.id === p.id; });
           return latest ? Object.assign({}, p, { handicap: latest.handicap }) : p;
         });
+        // Force-sync prop bet definitions from code so removed props disappear and
+        // newly added props show up. Preserve settled/winner state for any prop that
+        // still exists (matched by id), and keep user-added custom props.
+        function syncProps(codeList, savedList) {
+          var savedById = {};
+          (savedList || []).forEach(function(s) { if (s && s.id) savedById[s.id] = s; });
+          var codeIds = {};
+          codeList.forEach(function(d) { codeIds[d.id] = true; });
+          // Start with the code list (preserving settled state for matching ids)
+          var result = codeList.map(function(def) {
+            var prev = savedById[def.id];
+            if (prev && (prev.settled || prev.winner)) {
+              return Object.assign({}, def, { settled: prev.settled, winner: prev.winner });
+            }
+            return Object.assign({}, def);
+          });
+          // Append any user-created custom props (ids not in the code list)
+          (savedList || []).forEach(function(s) {
+            if (s && s.id && !codeIds[s.id] && s.isCustom) result.push(s);
+          });
+          return result;
+        }
+        merged.bets = syncProps(DEFAULT_PROPS, merged.bets);
+        merged.individualProps = syncProps(DEFAULT_INDIVIDUAL_PROPS, merged.individualProps);
         merged.players.forEach(function(p) {
           if (!merged.scores[p.id]) {
             merged.scores[p.id] = {};
@@ -2429,7 +2453,7 @@ function BetsTab(props) {
                 <div style={{display:"flex", gap:8, marginTop:4}}>
                   <button style={Object.assign({}, S.primaryBtn, {flex:1, opacity:!customPropName.trim() ? 0.5 : 1})} onClick={function() {
                     if (!customPropName.trim()) return;
-                    var newProp = { id:"ip"+Date.now(), name:customPropName.trim(), desc:"", settled:false, winner:null, buyin:parseFloat(customPropBuyin)||10 };
+                    var newProp = { id:"ip"+Date.now(), name:customPropName.trim(), desc:"", settled:false, winner:null, buyin:parseFloat(customPropBuyin)||10, isCustom:true };
                     update({individualProps:individualProps.concat([newProp])});
                     setCustomPropName(""); setCustomPropBuyin("10"); setAddingProp(false);
                   }}>Create</button>
