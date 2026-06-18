@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "1.2";
+const APP_VERSION = "1.3";
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
 const AUTH_KEY = "ni-links-auth";
 const GROUP_PIN = "2026";
@@ -684,6 +684,11 @@ export default function App() {
   var ld = useState(true); var loading = ld[0], setLoading = ld[1];
   var sh = useState(null); var scoringHole = sh[0], setScoringHole = sh[1];
   var sv = useState("idle"); var saveStatus = sv[0], setSaveStatus = sv[1];
+  var lcs = useState(0); var latestChatTs = lcs[0], setLatestChatTs = lcs[1];
+  var scs = useState(function() {
+    try { return parseInt(localStorage.getItem("ni-links-chat-seen") || "0", 10) || 0; } catch(e) { return 0; }
+  });
+  var chatSeenTs = scs[0], setChatSeenTs = scs[1];
   var as = useState(function() {
     var authState = loadAuth();
     return { authed:authState ? authState.authed : false, playerId:authState ? authState.playerId : null, loaded:true };
@@ -757,6 +762,30 @@ export default function App() {
     });
     return function() { unsub(); };
   }, []);
+
+  // Lightweight chat subscription at the app level — only tracks the newest
+  // message timestamp so we can show an unread badge on the Chat tab.
+  useEffect(function() {
+    var unsub = subscribeToChat(function(msgs) {
+      if (!msgs || !msgs.length) return;
+      var newest = 0;
+      msgs.forEach(function(m) {
+        if (m && m.ts) { var t = new Date(m.ts).getTime(); if (t > newest) newest = t; }
+      });
+      setLatestChatTs(newest);
+    });
+    return function() { unsub(); };
+  }, []);
+
+  // When the user opens the Chat tab, mark everything as seen.
+  useEffect(function() {
+    if (state.activeTab === "chat" && latestChatTs > 0) {
+      setChatSeenTs(latestChatTs);
+      try { localStorage.setItem("ni-links-chat-seen", String(latestChatTs)); } catch(e) {}
+    }
+  }, [state.activeTab, latestChatTs]);
+
+  var hasUnreadChat = latestChatTs > chatSeenTs;
 
   function handlePinSuccess() {
     var next = { authed:true, playerId:null, loaded:true, guest:false };
@@ -924,9 +953,13 @@ export default function App() {
       <nav style={S.nav}>
         {TABS.map(function(t) {
           var active = activeTab === t.id;
+          var showDot = t.id === "chat" && hasUnreadChat && !active;
           return (
             <button key={t.id} onClick={function() { setState(function(prev) { return Object.assign({}, prev, { activeTab:t.id }); }); }} style={S.navBtn}>
-              <span style={{fontSize:18}}>{t.icon}</span>
+              <span style={{fontSize:18, position:"relative"}}>
+                {t.icon}
+                {showDot && <span style={{position:"absolute", top:-2, right:-6, width:9, height:9, borderRadius:5, background:CL.red, border:"1.5px solid "+CL.card}} />}
+              </span>
               <span style={Object.assign({}, S.navLabel, active ? {color:CL.red} : {})}>{t.label}</span>
             </button>
           );
