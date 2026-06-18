@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "2.0";
+const APP_VERSION = "2.1";
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
 const AUTH_KEY = "ni-links-auth";
 const GROUP_PIN = "2026";
@@ -196,6 +196,7 @@ function defaultState() {
     drinks: {},
     expenses: [],
     selectedTees: [0, 0, 0, 0, 0],
+    skinsEligible: { gross: [], net: [] },
     weatherCache: null,
   };
 }
@@ -336,6 +337,69 @@ function getTotalStableford(scores, pid, handicap) {
 // GROSS Stableford — same scoring but no strokes given (handicap = 0).
 function getTotalGrossStableford(scores, pid) {
   return getTotalStableford(scores, pid, 0);
+}
+
+// Compute skins for a round. Returns { results: [{hole, winner(pid), value, pushed}], totals: {pid: count} }
+// useNet=true → net skins (apply handicap strokes per hole), false → gross skins
+function computeSkins(scores, players, eligibleIds, ri, useNet) {
+  var course = COURSES[ri];
+  var results = [];
+  var carry = 1; // number of skins on current hole (increases with pushes)
+  var totals = {};
+  eligibleIds.forEach(function(id) { totals[id] = 0; });
+
+  for (var h = 0; h < 18; h++) {
+    // Get each eligible player's score for this hole
+    var holeScores = [];
+    var allHaveScore = true;
+    eligibleIds.forEach(function(pid) {
+      var raw = scores[pid] && scores[pid][ri] && scores[pid][ri][h];
+      if (raw == null) { allHaveScore = false; return; }
+      var val = raw;
+      if (useNet) {
+        var p = players.find(function(x) { return x.id === pid; });
+        var ch = getCourseHandicap(p.handicap, ri);
+        var si = course.si ? course.si[h] : 99;
+        val = raw - strokesOnHole(ch, si);
+      }
+      holeScores.push({ pid: pid, val: val });
+    });
+
+    if (!allHaveScore || holeScores.length < 2) {
+      results.push({ hole: h, winner: null, value: carry, pushed: true });
+      carry++;
+      continue;
+    }
+
+    // Find lowest score
+    holeScores.sort(function(a, b) { return a.val - b.val; });
+    var lowest = holeScores[0].val;
+    var winners = holeScores.filter(function(x) { return x.val === lowest; });
+
+    if (winners.length === 1) {
+      // Sole winner — wins all carried skins
+      results.push({ hole: h, winner: winners[0].pid, value: carry, pushed: false });
+      totals[winners[0].pid] += carry;
+      carry = 1; // reset
+    } else {
+      // Tie — push
+      results.push({ hole: h, winner: null, value: carry, pushed: true });
+      carry++;
+    }
+  }
+
+  return { results: results, totals: totals, carry: carry > 1 ? carry - 1 : 0 };
+}
+
+// Get total skins across all rounds for a player
+function getTotalSkins(scores, players, eligibleIds, useNet) {
+  var grandTotal = {};
+  eligibleIds.forEach(function(id) { grandTotal[id] = 0; });
+  for (var ri = 0; ri < COURSES.length; ri++) {
+    var rd = computeSkins(scores, players, eligibleIds, ri, useNet);
+    eligibleIds.forEach(function(id) { grandTotal[id] += (rd.totals[id] || 0); });
+  }
+  return grandTotal;
 }
 
 // Team Stableford for a round — sum of the best N scores on the team that round.
@@ -793,6 +857,7 @@ export default function App() {
           drinks: fresh.drinks,
           expenses: fresh.expenses,
           selectedTees: fresh.selectedTees,
+          skinsEligible: fresh.skinsEligible,
         });
         setState(function(prev) { return Object.assign({}, prev, { initialized:true }); });
       }
@@ -863,9 +928,9 @@ export default function App() {
     // Master guard: guests can never write synced data to Firebase.
     var isGuestWrite = guestRef.current;
     // Book guard: only gatekeepers may write most bet/expense data. Strip those
-    // changes for everyone else. EXCEPTION: h2hBets — any signed-in player may
-    // join/leave a head-to-head bet (create/delete/settle stays gatekeeper-only,
-    // enforced in the H2H UI). Guests still can't write anything.
+    // changes for everyone else. EXCEPTION: h2hBets and skinsEligible — any signed-in
+    // player may join/leave (create/delete/settle stays gatekeeper-only,
+    // enforced in the UI). Guests still can't write anything.
     if (!canEditBooksRef.current && !isGuestWrite) {
       var bookFields = ["games", "bets", "individualProps", "teamMatches", "drinks", "expenses", "customBets"];
       var stripped = false;
@@ -875,7 +940,7 @@ export default function App() {
       if (stripped && Object.keys(changes).length === 0) return; // nothing left to apply
     } else if (!canEditBooksRef.current) {
       // Guests: strip everything including h2hBets
-      var bookFields2 = ["games", "bets", "individualProps", "h2hBets", "teamMatches", "drinks", "expenses", "customBets"];
+      var bookFields2 = ["games", "bets", "individualProps", "h2hBets", "teamMatches", "drinks", "expenses", "customBets", "skinsEligible"];
       var stripped2 = false;
       bookFields2.forEach(function(f) {
         if (Object.prototype.hasOwnProperty.call(changes, f)) { delete changes[f]; stripped2 = true; }
@@ -885,7 +950,7 @@ export default function App() {
     setState(function(prev) {
       var next = Object.assign({}, prev, changes);
       // Save to Firebase (debounced to avoid hammering Firestore) — never for guests
-      if (!isGuestWrite && (changes.scores || changes.players || changes.games || changes.bets || changes.individualProps || changes.h2hBets || changes.teamMatches || changes.drinks || changes.expenses || changes.selectedTees)) {
+      if (!isGuestWrite && (changes.scores || changes.players || changes.games || changes.bets || changes.individualProps || changes.h2hBets || changes.teamMatches || changes.drinks || changes.expenses || changes.selectedTees || changes.skinsEligible)) {
         clearTimeout(saveTimer.current);
         setSaveStatus("saving");
         saveTimer.current = setTimeout(function() {
@@ -900,6 +965,7 @@ export default function App() {
             drinks: next.drinks,
             expenses: next.expenses,
             selectedTees: next.selectedTees,
+            skinsEligible: next.skinsEligible,
           }).then(function() {
             setSaveStatus("saved");
             setTimeout(function() { setSaveStatus("idle"); }, 1500);
@@ -927,6 +993,7 @@ export default function App() {
       drinks: fresh.drinks,
       expenses: fresh.expenses,
       selectedTees: fresh.selectedTees,
+      skinsEligible: fresh.skinsEligible,
     });
   };
 
@@ -989,7 +1056,7 @@ export default function App() {
             <div style={{fontSize:14, color:CL.muted, fontFamily:"system-ui", marginBottom:20}}>Sign in with the group passcode to view bets and games.</div>
             <button onClick={handleLogout} style={Object.assign({}, S.primaryBtn, {width:"auto", padding:"12px 32px"})}>Sign In</button>
           </div>
-        ) : <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} isGuest={booksReadOnly} canEdit={canEditBooks} />)}
+        ) : <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} isGuest={booksReadOnly} canEdit={canEditBooks} skinsEligible={state.skinsEligible || {gross:[], net:[]}} />)}
         {activeTab === "expenses" && (isGuest ? (
           <div style={{padding:"60px 24px", textAlign:"center"}}>
             <div style={{fontSize:48, marginBottom:16}}>🔒</div>
@@ -2228,6 +2295,7 @@ function BetsTab(props) {
   var players = props.players, games = props.games, bets = props.bets;
   var scores = props.scores || {};
   var customBets = props.customBets, h2hBets = props.h2hBets || [], drinks = props.drinks || {};
+  var skinsEligible = props.skinsEligible || { gross: [], net: [] };
   var teamMatches = props.teamMatches || DEFAULT_TEAM_MATCHES;
   var individualProps = props.individualProps || DEFAULT_INDIVIDUAL_PROPS;
   var expenses = props.expenses || [];
@@ -2351,7 +2419,7 @@ function BetsTab(props) {
     setPName(""); setPHcp(""); setPEmoji("🔴"); setEditId(null);
   }
 
-  var subTabs = [{id:"team",label:"🏆 Team"},{id:"ind",label:"⛳ Ind"},{id:"props",label:"🎯 Props"},{id:"h2h",label:"🤝 H2H"},{id:"games",label:"Games"},{id:"settle",label:"💸 Settle"},{id:"drinks",label:"🍺"}];
+  var subTabs = [{id:"team",label:"🏆 Team"},{id:"ind",label:"⛳ Ind"},{id:"skins",label:"🔪 Skins"},{id:"props",label:"🎯 Props"},{id:"h2h",label:"🤝 H2H"},{id:"games",label:"Games"},{id:"settle",label:"💸 Settle"},{id:"drinks",label:"🍺"}];
 
   return (
     <div>
@@ -2362,7 +2430,7 @@ function BetsTab(props) {
       </div>
 
       {/* Betting summary — net position per player (excludes expenses). Hidden on Stableford tab. */}
-      {tab !== "team" && tab !== "ind" && (
+      {tab !== "team" && tab !== "ind" && tab !== "skins" && (
       <div style={S.card}>
         <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8}}>
           <div style={S.cardTitle}>💰 Betting Summary</div>
@@ -2550,6 +2618,110 @@ function BetsTab(props) {
           </div>
         );
       })()}
+
+      {tab === "skins" && (
+        <div>
+          {/* Skins opt-in and results */}
+          {(function() {
+            function toggleSkin(type, pid) {
+              var se = Object.assign({}, skinsEligible);
+              var list = (se[type] || []).slice();
+              var idx = list.indexOf(pid);
+              if (idx >= 0) list.splice(idx, 1); else list.push(pid);
+              se[type] = list;
+              update({skinsEligible:se});
+            }
+            function renderSkinsSection(type, label, emoji) {
+              var eligible = skinsEligible[type] || [];
+              var useNet = type === "net";
+              // Trip totals
+              var tripTotals = eligible.length >= 2 ? getTotalSkins(scores, players, eligible, useNet) : {};
+              var totalSkins = 0;
+              eligible.forEach(function(id) { totalSkins += (tripTotals[id] || 0); });
+              var sortedPlayers = eligible.map(function(pid) {
+                var p = players.find(function(x) { return x.id === pid; });
+                return { p:p, skins: tripTotals[pid] || 0 };
+              }).sort(function(a, b) { return b.skins - a.skins; });
+              var topSkins = sortedPlayers.length ? sortedPlayers[0].skins : 0;
+
+              return (
+                <div style={S.card}>
+                  <div style={S.cardTitle}>{emoji+" "+label}</div>
+                  <div style={Object.assign({}, S.label, {marginBottom:4})}>{useNet ? "Net scores (after handicap strokes) determine skins." : "Raw gross scores determine skins."} Sole low score on a hole wins. Ties push.</div>
+                  <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginBottom:10, fontWeight:600}}>$20/skin · {eligible.length} player{eligible.length!==1?"s":""} in</div>
+
+                  {/* Opt-in toggles */}
+                  <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginBottom:4}}>Who's in:</div>
+                  <div style={{display:"flex", gap:4, flexWrap:"wrap", marginBottom:12}}>
+                    {players.map(function(p) {
+                      var isIn = eligible.indexOf(p.id) >= 0;
+                      return <button key={p.id} onClick={function() { toggleSkin(type, p.id); }} style={Object.assign({}, S.pillBtn, isIn ? {background:"rgba(34,197,94,0.2)", borderColor:"#22c55e", color:"#22c55e"} : {opacity:0.6})}>{(isIn?"✓ ":"")+p.emoji+" "+p.name.split(" ")[0]}</button>;
+                    })}
+                  </div>
+
+                  {eligible.length < 2 ? (
+                    <div style={{textAlign:"center", padding:16, color:CL.muted, fontFamily:"system-ui", fontSize:13}}>Select at least 2 players to start.</div>
+                  ) : (
+                    <div>
+                      {/* Trip totals leaderboard */}
+                      <div style={{fontSize:13, fontWeight:700, color:"#fff", fontFamily:"system-ui", marginBottom:6}}>Trip Total</div>
+                      {sortedPlayers.map(function(x, i) {
+                        var isLeader = x.skins > 0 && x.skins === topSkins;
+                        var winnings = x.skins * 20 * (eligible.length - 1);
+                        var cost = (totalSkins - x.skins) * 20;
+                        var net = winnings - cost;
+                        return (
+                          <div key={x.p.id} style={Object.assign({display:"flex", alignItems:"center", padding:"7px 0", gap:10}, i<sortedPlayers.length-1?S.separator:{}, isLeader?{background:"rgba(34,197,94,0.08)", margin:"0 -8px", padding:"7px 8px", borderRadius:6}:{})}>
+                            <div style={{fontSize:15}}>{x.p.emoji}</div>
+                            <div style={{flex:1, fontSize:14, color:"#fff", fontFamily:"system-ui"}}>{x.p.name.split(" ")[0]}</div>
+                            <div style={{fontSize:14, fontWeight:700, color:isLeader?"#22c55e":"#fff", fontFamily:"system-ui", width:50, textAlign:"center"}}>{x.skins+" 🏆"}</div>
+                            <div style={{fontSize:12, fontWeight:600, color:net>0?"#22c55e":net<0?"#ef4444":CL.muted, fontFamily:"system-ui", width:55, textAlign:"right"}}>{net>0?"+$"+net:net<0?"-$"+Math.abs(net):"Even"}</div>
+                          </div>
+                        );
+                      })}
+
+                      {/* Per-round breakdown */}
+                      <div style={{fontSize:13, fontWeight:700, color:"#fff", fontFamily:"system-ui", marginTop:16, marginBottom:6}}>By Round</div>
+                      {COURSES.map(function(c, ri) {
+                        var rd = computeSkins(scores, players, eligible, ri, useNet);
+                        var anyScores = rd.results.some(function(r) { return r.winner !== null; });
+                        var hasData = rd.results.some(function(r) { return !r.pushed || r.value > 1; });
+                        // Count skins won per player this round
+                        var roundSkins = {};
+                        eligible.forEach(function(id) { roundSkins[id] = rd.totals[id] || 0; });
+                        var roundTotal = Object.values(roundSkins).reduce(function(a,b){return a+b;},0);
+                        return (
+                          <div key={ri} style={{marginBottom:8}}>
+                            <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", padding:"6px 0"}}>
+                              <div style={{fontSize:13, color:"#fff", fontFamily:"system-ui", fontWeight:600}}>{COURSE_LABELS[ri]}</div>
+                              <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui"}}>{roundTotal > 0 ? roundTotal+" skin"+(roundTotal!==1?"s":"")+" won" : anyScores ? "No skins yet" : "Not played"}{rd.carry > 0 ? " · "+rd.carry+" pushed" : ""}</div>
+                            </div>
+                            {roundTotal > 0 && (
+                              <div style={{display:"flex", gap:8, flexWrap:"wrap", marginBottom:4}}>
+                                {eligible.map(function(pid) {
+                                  if (!roundSkins[pid]) return null;
+                                  var p = players.find(function(x){return x.id===pid;});
+                                  return <span key={pid} style={{fontSize:12, color:"#22c55e", fontFamily:"system-ui"}}>{p.emoji+" "+p.name.split(" ")[0]+": "+roundSkins[pid]}</span>;
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            }
+            return (
+              <div>
+                {renderSkinsSection("gross", "Gross Skins", "⛳")}
+                {renderSkinsSection("net", "Net Skins", "🎯")}
+              </div>
+            );
+          })()}
+        </div>
+      )}
 
       {tab === "props" && (
         <div>
