@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "1.6";
+const APP_VERSION = "1.8";
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
 const AUTH_KEY = "ni-links-auth";
 const GROUP_PIN = "2026";
@@ -102,29 +102,17 @@ const QUICK_REF = [
   { label:"Tipping", value:"10% at restaurants, not expected in pubs" },
 ];
 
-const DEFAULT_PROPS = [
-  { id:"b1", name:"Low Team Net — Ardglass (WASPs vs Italians)", settled:false, winner:null, buyin:20 },
-  { id:"b2", name:"Low Team Net — Royal County Down (WASPs vs Italians)", settled:false, winner:null, buyin:20 },
-  { id:"b3", name:"Low Team Net — Castlerock (WASPs vs Italians)", settled:false, winner:null, buyin:20 },
-  { id:"b4", name:"Low Team Net — Royal Portrush (WASPs vs Italians)", settled:false, winner:null, buyin:20 },
-  { id:"b5", name:"Low Team Net — Portstewart (WASPs vs Italians)", settled:false, winner:null, buyin:20 },
-  { id:"b6", name:"WASPs vs Italians — Trip Total Net Strokes", settled:false, winner:null, buyin:50 },
-  { id:"b7", name:"WASPs vs Italians — Most Rounds Won", settled:false, winner:null, buyin:10 },
-];
+const DEFAULT_PROPS = [];
 
-// Individual prop bets — winner takes the pot ($10/player buy-in)
+// Individual prop bets — player-selectable eligibility, net scoring
 const DEFAULT_INDIVIDUAL_PROPS = [
-  { id:"ip8", name:"Most Stableford Points (Trip)", desc:"Highest total Stableford points across all 5 rounds", settled:false, winner:null, buyin:10 },
-  { id:"ipsf0", name:"Most Stableford — Ardglass", desc:"Most Stableford points at Ardglass", settled:false, winner:null, buyin:10 },
-  { id:"ipsf1", name:"Most Stableford — Royal County Down", desc:"Most Stableford points at Royal County Down", settled:false, winner:null, buyin:10 },
-  { id:"ipsf2", name:"Most Stableford — Castlerock", desc:"Most Stableford points at Castlerock", settled:false, winner:null, buyin:10 },
-  { id:"ipsf3", name:"Most Stableford — Royal Portrush", desc:"Most Stableford points at Royal Portrush", settled:false, winner:null, buyin:10 },
-  { id:"ipsf4", name:"Most Stableford — Portstewart", desc:"Most Stableford points at Portstewart", settled:false, winner:null, buyin:10 },
-  { id:"ip1", name:"Lowest Net Score (Trip)", desc:"Best net total across all 5 rounds", settled:false, winner:null, buyin:10 },
-  { id:"ip3", name:"Most Triple Bogeys or Worse", desc:"Most holes at triple bogey (+3) or higher", settled:false, winner:null, buyin:10 },
-  { id:"ip4", name:"Most Pars or Better (Trip)", desc:"Most holes played at par or under", settled:false, winner:null, buyin:10 },
-  { id:"ip5", name:"Closest to the Pin — RCD par 3s", desc:"Best on a designated Royal County Down par 3", settled:false, winner:null, buyin:10 },
-  { id:"ip7", name:"Best Single Round (Net)", desc:"Lowest net score in any one round", settled:false, winner:null, buyin:10 },
+  { id:"ip8", name:"Most Net Stableford Points (Trip)", desc:"Highest total net Stableford across all 5 rounds", settled:false, winner:null, buyin:10, eligible:[] },
+  { id:"ipsf0", name:"Most Net Stableford — Ardglass", desc:"Most net Stableford points at Ardglass", settled:false, winner:null, buyin:10, eligible:[] },
+  { id:"ipsf1", name:"Most Net Stableford — Royal County Down", desc:"Most net Stableford points at Royal County Down", settled:false, winner:null, buyin:10, eligible:[] },
+  { id:"ipsf2", name:"Most Net Stableford — Castlerock", desc:"Most net Stableford points at Castlerock", settled:false, winner:null, buyin:10, eligible:[] },
+  { id:"ipsf3", name:"Most Net Stableford — Royal Portrush", desc:"Most net Stableford points at Royal Portrush", settled:false, winner:null, buyin:10, eligible:[] },
+  { id:"ipsf4", name:"Most Net Stableford — Portstewart", desc:"Most net Stableford points at Portstewart", settled:false, winner:null, buyin:10, eligible:[] },
+  { id:"ip1", name:"Lowest Net Score (Trip)", desc:"Best net total across all 5 rounds", settled:false, winner:null, buyin:10, eligible:[] },
 ];
 
 const DEFAULT_TEAM_MATCHES = [
@@ -220,6 +208,27 @@ function getRoundScore(scores, pid, ri) {
   if (!h) return null;
   var f = h.filter(function(v) { return v !== null; });
   return f.length === 0 ? null : f.reduce(function(a, b) { return a + b; }, 0);
+}
+
+// Total GROSS strokes across all 5 rounds for a player (only counts completed rounds).
+function getTotalGross(scores, pid) {
+  var total = 0, any = false;
+  for (var ri = 0; ri < COURSES.length; ri++) {
+    var r = getRoundScore(scores, pid, ri);
+    if (r !== null) { total += r; any = true; }
+  }
+  return any ? total : null;
+}
+
+// Split players into two gross brackets by handicap index:
+// Group A = lowest 4 HIs, Group B = highest 4 HIs. Returns {a:[ids], b:[ids]}.
+function getGrossBrackets(players) {
+  var sorted = players.slice().sort(function(a, b) { return a.handicap - b.handicap; });
+  var half = Math.ceil(sorted.length / 2);
+  return {
+    a: sorted.slice(0, half).map(function(p) { return p.id; }),
+    b: sorted.slice(half).map(function(p) { return p.id; }),
+  };
 }
 
 // Active slopes — updated from state when tees are selected. Defaults to first tee option per course.
@@ -728,11 +737,14 @@ export default function App() {
           (savedList || []).forEach(function(s) { if (s && s.id) savedById[s.id] = s; });
           var codeIds = {};
           codeList.forEach(function(d) { codeIds[d.id] = true; });
-          // Start with the code list (preserving settled state for matching ids)
+          // Start with the code list (preserving settled state + eligible selections for matching ids)
           var result = codeList.map(function(def) {
             var prev = savedById[def.id];
-            if (prev && (prev.settled || prev.winner)) {
-              return Object.assign({}, def, { settled: prev.settled, winner: prev.winner });
+            if (prev) {
+              var merged = Object.assign({}, def);
+              if (prev.settled || prev.winner) { merged.settled = prev.settled; merged.winner = prev.winner; }
+              if (prev.eligible) merged.eligible = prev.eligible; // keep who's been selected
+              return merged;
             }
             return Object.assign({}, def);
           });
@@ -2154,7 +2166,7 @@ function BetsTab(props) {
   var expenses = props.expenses || [];
   var addingGame = props.addingGame, update = props.update, resetAll = props.resetAll;
 
-  var ts = useState("stableford"); var tab = ts[0], setTab = ts[1];
+  var ts = useState("team"); var tab = ts[0], setTab = ts[1];
   var gts = useState("skins"); var gameType = gts[0], setGameType = gts[1];
   var sks = useState("5"); var stake = sks[0], setStake = sks[1];
   var rds = useState(0); var round = rds[0], setRound = rds[1];
@@ -2272,7 +2284,7 @@ function BetsTab(props) {
     setPName(""); setPHcp(""); setPEmoji("🔴"); setEditId(null);
   }
 
-  var subTabs = [{id:"stableford",label:"🏆 Stableford"},{id:"props",label:"🎯 Props"},{id:"match",label:"⚔️ Teams"},{id:"h2h",label:"🤝 H2H"},{id:"games",label:"Games"},{id:"settle",label:"💸 Settle"},{id:"drinks",label:"🍺"},{id:"players",label:"👥"}];
+  var subTabs = [{id:"team",label:"🏆 Team"},{id:"ind",label:"⛳ Ind"},{id:"props",label:"🎯 Props"},{id:"h2h",label:"🤝 H2H"},{id:"games",label:"Games"},{id:"settle",label:"💸 Settle"},{id:"drinks",label:"🍺"},{id:"players",label:"👥"}];
 
   return (
     <div>
@@ -2283,7 +2295,7 @@ function BetsTab(props) {
       </div>
 
       {/* Betting summary — net position per player (excludes expenses). Hidden on Stableford tab. */}
-      {tab !== "stableford" && (
+      {tab !== "team" && tab !== "ind" && (
       <div style={S.card}>
         <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8}}>
           <div style={S.cardTitle}>💰 Betting Summary</div>
@@ -2351,7 +2363,7 @@ function BetsTab(props) {
       </div>
       )}
 
-      {tab === "stableford" && (function() {
+      {tab === "team" && (function() {
         var matchup = TEAM_MATCHUPS[0];
         var aIds = resolveTeam(matchup.teamA, players);
         var bIds = resolveTeam(matchup.teamB, players);
@@ -2360,14 +2372,15 @@ function BetsTab(props) {
         var aLead = aTotal > bTotal, bLead = bTotal > aTotal;
         var indiv = players.map(function(p) {
           return { p:p, pts:getTotalStableford(scores, p.id, p.handicap) };
-        }).filter(function(x) { return x.pts !== null; }).sort(function(a,b) { return b.pts - a.pts; });
+        }).filter(function(x) { return x.pts !== null; });
         var anyScores = indiv.length > 0;
         return (
           <div>
             {/* Team Stableford matchup — the main event */}
             <div style={S.card}>
               <div style={S.cardTitle}>🏆 Team Stableford — The Main Event</div>
-              <div style={Object.assign({}, S.label, {marginBottom:12})}>Net Stableford points across all 5 rounds. All 4 scores count each round. More points wins.</div>
+              <div style={Object.assign({}, S.label, {marginBottom:4})}>Overall team competition. Net Stableford points across all 5 rounds. All 4 scores count each round. More points wins.</div>
+              <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginBottom:12, fontWeight:600}}>$100/man · Winning team's 4 players each win $100</div>
               <div style={{display:"flex", gap:8, alignItems:"stretch"}}>
                 <div style={Object.assign({}, S.teamBox, aLead ? S.teamBoxWin : {}, {textAlign:"center"})}>
                   <div style={{fontSize:24, marginBottom:2}}>{matchup.teamA.emoji}</div>
@@ -2419,24 +2432,54 @@ function BetsTab(props) {
                 );
               })}
             </div>
+          </div>
+        );
+      })()}
 
-            {/* Individual Stableford leaderboard */}
+      {tab === "ind" && (function() {
+        var brackets = getGrossBrackets(players);
+        function bracketRows(ids) {
+          return ids.map(function(pid) {
+            var p = players.find(function(x) { return x.id === pid; });
+            return { p:p, gross:getTotalGross(scores, pid) };
+          }).sort(function(a, b) {
+            if (a.gross === null) return 1;
+            if (b.gross === null) return -1;
+            return a.gross - b.gross;
+          });
+        }
+        function renderBracket(label, ids) {
+          var rows = bracketRows(ids);
+          var pot = ids.length * 50;
+          var played = rows.filter(function(r) { return r.gross !== null; });
+          var leaderGross = played.length ? played[0].gross : null;
+          return (
+            <div style={{marginBottom:14}}>
+              <div style={{display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:6}}>
+                <div style={{fontSize:14, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{label}</div>
+                <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", fontWeight:600}}>{"$50/man · $"+pot+" winner-take-all"}</div>
+              </div>
+              {rows.map(function(r, i) {
+                var isLeader = r.gross !== null && r.gross === leaderGross;
+                return (
+                  <div key={r.p.id} style={Object.assign({display:"flex", alignItems:"center", padding:"7px 0", gap:10}, i<rows.length-1?S.separator:{}, isLeader?{background:"rgba(34,197,94,0.08)", margin:"0 -8px", padding:"7px 8px", borderRadius:6}:{})}>
+                    <div style={{fontSize:15}}>{r.p.emoji}</div>
+                    <div style={{flex:1, fontSize:14, color:"#fff", fontFamily:"system-ui"}}>{r.p.name}<span style={{color:CL.muted, fontSize:11}}>{" ("+r.p.handicap+")"}</span></div>
+                    <div style={{fontSize:16, fontWeight:700, color:isLeader?"#22c55e":"#fff", fontFamily:"system-ui"}}>{r.gross !== null ? r.gross : "—"}</div>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        }
+        return (
+          <div>
             <div style={S.card}>
-              <div style={S.cardTitle}>Individual Stableford</div>
-              {!anyScores ? <div style={{textAlign:"center", color:CL.muted, padding:16, fontSize:14, fontFamily:"system-ui"}}>No scores yet.</div> :
-                indiv.map(function(x, i) {
-                  var onA = aIds.indexOf(x.p.id) >= 0;
-                  return (
-                    <div key={x.p.id} style={Object.assign({display:"flex", alignItems:"center", padding:"10px 0", gap:10}, i<indiv.length-1?S.separator:{}, i===0?{background:"rgba(34,197,94,0.08)", margin:"0 -8px", padding:"10px 8px", borderRadius:6}:{})}>
-                      <div style={{width:24, fontSize:14, fontWeight:700, color:i===0?"#22c55e":CL.muted, fontFamily:"system-ui"}}>{i+1}</div>
-                      <div style={{fontSize:16}}>{onA?matchup.teamA.emoji:matchup.teamB.emoji}</div>
-                      <div style={{flex:1, fontSize:15, color:"#fff", fontFamily:"system-ui"}}>{x.p.name}</div>
-                      <div style={{fontSize:17, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{x.pts}</div>
-                    </div>
-                  );
-                })
-              }
-              <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginTop:8, textAlign:"center"}}>Eagle 4 · Birdie 3 · Par 2 · Bogey 1 · Double+ 0 (net of handicap)</div>
+              <div style={S.cardTitle}>⛳ Individual Gross — Groups A & B</div>
+              <div style={Object.assign({}, S.label, {marginBottom:12})}>Lowest total GROSS strokes across all 5 rounds wins each group. Winner takes the whole pot.</div>
+              {renderBracket("Group A — Low Handicaps", brackets.a)}
+              {renderBracket("Group B — High Handicaps", brackets.b)}
+              <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", textAlign:"center"}}>Groups set by handicap index · gross (no strokes given)</div>
             </div>
           </div>
         );
@@ -2444,72 +2487,41 @@ function BetsTab(props) {
 
       {tab === "props" && (
         <div>
+          {/* Individual Prop Bets — player-selectable eligibility, net scoring */}
           <div style={S.card}>
-            <div style={S.cardTitle}>🎯 Prop Bets</div>
-            <div style={Object.assign({}, S.label, {marginBottom:12})}>$20/player per round · Low team net wins the pot. Tap winning team to settle.</div>
-            {bets.map(function(bet) {
-              var matchup = TEAM_MATCHUPS[0];
-              var isTeamBet = bet.name.indexOf("WASPs vs Italians") >= 0;
-              var pot = (bet.buyin || 0) * players.length;
-              var winnerLabel = "";
-              if (bet.settled) {
-                if (bet.winner === "teamA") winnerLabel = matchup.teamA.emoji + " " + matchup.teamA.name;
-                else if (bet.winner === "teamB") winnerLabel = matchup.teamB.emoji + " " + matchup.teamB.name;
-                else { var wp = players.find(function(p) { return p.id===bet.winner; }); if (wp) winnerLabel = wp.emoji + " " + wp.name; }
-              }
-              return (
-                <div key={bet.id} style={Object.assign({padding:"10px 0"}, S.separator)}>
-                  <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
-                    <div>
-                      <div style={{fontSize:15, color:bet.settled?CL.muted:"#fff", fontWeight:600, textDecoration:bet.settled?"line-through":"none"}}>{bet.name}</div>
-                      <div style={{fontSize:11, color:CL.red, fontFamily:"system-ui"}}>{"$"+bet.buyin+"/player · $"+pot+" pot"}</div>
-                    </div>
-                    {bet.settled && <button style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:10, fontFamily:"system-ui"}} onClick={function() { update({bets:bets.map(function(b) { return b.id===bet.id ? Object.assign({},b,{settled:false,winner:null}) : b; })}); }}>Reset</button>}
-                  </div>
-                  {bet.settled ? (
-                    <div style={{fontSize:12, color:"#22c55e", fontFamily:"system-ui", marginTop:4}}>{"🏆 "+winnerLabel+" wins $"+(pot - bet.buyin)}</div>
-                  ) : (
-                    <div style={{display:"flex", gap:6, marginTop:6}}>
-                      <button onClick={function() { update({bets:bets.map(function(b) { return b.id===bet.id ? Object.assign({},b,{settled:true,winner:"teamA"}) : b; })}); }} style={Object.assign({}, S.pillBtn, {flex:1, textAlign:"center", padding:"8px 0", borderColor:"rgba(220,38,38,0.4)"})}>
-                        {matchup.teamA.emoji + " " + matchup.teamA.name}
-                      </button>
-                      <button onClick={function() { update({bets:bets.map(function(b) { return b.id===bet.id ? Object.assign({},b,{settled:true,winner:"teamB"}) : b; })}); }} style={Object.assign({}, S.pillBtn, {flex:1, textAlign:"center", padding:"8px 0", borderColor:"rgba(37,99,235,0.4)"})}>
-                        {matchup.teamB.emoji + " " + matchup.teamB.name}
-                      </button>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Individual Prop Bets */}
-          <div style={S.card}>
-            <div style={S.cardTitle}>🏆 Individual Props</div>
-            <div style={Object.assign({}, S.label, {marginBottom:12})}>$10/player buy-in · Winner takes the pot. Tap the winner to settle.</div>
+            <div style={S.cardTitle}>🎯 Individual Props</div>
+            <div style={Object.assign({}, S.label, {marginBottom:12})}>Tap players to set who's IN each bet. Only selected players are eligible. Winner = best NET among those selected.</div>
             {individualProps.map(function(prop) {
               var winner = players.find(function(x) { return x.id === prop.winner; });
-              var pot = (prop.buyin || 10) * players.length;
-              // For Stableford props, compute the current leader to make settling easy.
-              var sfLeader = null;
-              if (!prop.settled) {
-                var sfScores = null;
+              var eligible = prop.eligible || [];
+              var pot = (prop.buyin || 10) * eligible.length;
+              // Compute the current NET leader among eligible players.
+              // Stableford-style props (ip8 / ipsf*) use net Stableford points;
+              // everything else uses net total score (lower is better).
+              var leader = null;
+              if (!prop.settled && eligible.length > 0) {
+                var rows = null, higherWins = true;
                 if (prop.id === "ip8") {
-                  // Most Stableford overall
-                  sfScores = players.map(function(p) { return { p:p, v:getTotalStableford(scores, p.id, p.handicap) }; });
+                  rows = eligible.map(function(pid) { var p = players.find(function(x){return x.id===pid;}); return { p:p, v:getTotalStableford(scores, pid, p.handicap) }; });
                 } else if (prop.id && prop.id.indexOf("ipsf") === 0) {
-                  // Per-round Stableford: ipsf0..ipsf4 → round index
                   var ri = parseInt(prop.id.replace("ipsf", ""), 10);
-                  sfScores = players.map(function(p) { return { p:p, v:getRoundStableford(scores, p.id, ri, p.handicap) }; });
+                  rows = eligible.map(function(pid) { var p = players.find(function(x){return x.id===pid;}); return { p:p, v:getRoundStableford(scores, pid, ri, p.handicap) }; });
+                } else {
+                  // Default: net total across trip (lower is better)
+                  higherWins = false;
+                  rows = eligible.map(function(pid) {
+                    var p = players.find(function(x){return x.id===pid;});
+                    var net = 0, any = false;
+                    for (var r=0;r<COURSES.length;r++){ var ns = getNetRoundScore(scores, pid, r, p.handicap); if (ns!==null){ net+=ns; any=true; } }
+                    return { p:p, v: any ? net : null };
+                  });
                 }
-                if (sfScores) {
-                  sfScores = sfScores.filter(function(x) { return x.v !== null; });
-                  if (sfScores.length) {
-                    sfScores.sort(function(a,b) { return b.v - a.v; });
-                    var top = sfScores[0];
-                    var tied = sfScores.filter(function(x) { return x.v === top.v; });
-                    sfLeader = { player: top.p, points: top.v, tied: tied.length > 1, tiedPlayers: tied };
-                  }
+                rows = rows.filter(function(x){ return x.v !== null; });
+                if (rows.length) {
+                  rows.sort(function(a,b){ return higherWins ? b.v - a.v : a.v - b.v; });
+                  var top = rows[0];
+                  var tied = rows.filter(function(x){ return x.v === top.v; });
+                  leader = { player: top.p, val: top.v, tied: tied.length>1, tiedPlayers: tied, higherWins: higherWins };
                 }
               }
               return (
@@ -2518,21 +2530,40 @@ function BetsTab(props) {
                     <div style={{flex:1}}>
                       <div style={{fontSize:15, fontWeight:600, color:prop.settled?CL.muted:"#fff", textDecoration:prop.settled?"line-through":"none"}}>{prop.name}</div>
                       {prop.desc && <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", marginTop:2}}>{prop.desc}</div>}
-                      <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginTop:2}}>{"$"+(prop.buyin||10)+"/player · $"+pot+" pot"}</div>
-                      {sfLeader && <div style={{fontSize:12, color:CL.blue, fontFamily:"system-ui", marginTop:3}}>{sfLeader.tied ? "Tied at "+sfLeader.points+" pts: "+sfLeader.tiedPlayers.map(function(t){return t.player.name.split(" ")[0];}).join(", ") : "Leading: "+sfLeader.player.emoji+" "+sfLeader.player.name.split(" ")[0]+" ("+sfLeader.points+" pts)"}</div>}
+                      <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginTop:2}}>{"$"+(prop.buyin||10)+"/player · "+eligible.length+" in · $"+pot+" pot"}</div>
+                      {leader && <div style={{fontSize:12, color:CL.blue, fontFamily:"system-ui", marginTop:3}}>{leader.tied ? "Tied: "+leader.tiedPlayers.map(function(t){return t.player.name.split(" ")[0];}).join(", ")+" ("+leader.val+(leader.higherWins?" pts)":" net)") : "Leading: "+leader.player.emoji+" "+leader.player.name.split(" ")[0]+" ("+leader.val+(leader.higherWins?" pts)":" net)")}</div>}
                     </div>
                     {!prop.settled && <button onClick={function() { if (confirm("Delete this prop?")) update({individualProps:individualProps.filter(function(x) { return x.id!==prop.id; })}); }} style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:14, flexShrink:0}}>🗑</button>}
                   </div>
                   {prop.settled ? (
                     <div style={{marginTop:6}}>
-                      <div style={{fontSize:14, color:"#22c55e", fontFamily:"system-ui"}}>{"🏆 "+(winner ? winner.emoji+" "+winner.name+" wins $"+(pot-(prop.buyin||10)) : "Winner")}</div>
+                      <div style={{fontSize:14, color:"#22c55e", fontFamily:"system-ui"}}>{"🏆 "+(winner ? winner.emoji+" "+winner.name+" wins $"+pot : "Winner")}</div>
                       <button onClick={function() { update({individualProps:individualProps.map(function(x) { return x.id===prop.id ? Object.assign({},x,{settled:false,winner:null}) : x; })}); }} style={{marginTop:6, fontSize:11, color:CL.muted, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:6, padding:"5px 12px", cursor:"pointer"}}>↩ Undo</button>
                     </div>
                   ) : (
-                    <div style={{display:"flex", gap:4, marginTop:8, flexWrap:"wrap"}}>
-                      {players.map(function(p) {
-                        return <button key={p.id} onClick={function() { update({individualProps:individualProps.map(function(x) { return x.id===prop.id ? Object.assign({},x,{settled:true,winner:p.id}) : x; })}); }} style={S.pillBtn}>{p.emoji+" "+p.name.split(" ")[0]}</button>;
-                      })}
+                    <div style={{marginTop:8}}>
+                      {/* Eligibility toggles — tap a player to include/exclude */}
+                      <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginBottom:4}}>Who's in:</div>
+                      <div style={{display:"flex", gap:4, flexWrap:"wrap", marginBottom:8}}>
+                        {players.map(function(p) {
+                          var isIn = eligible.indexOf(p.id) >= 0;
+                          return <button key={p.id} onClick={function() {
+                            var ne = isIn ? eligible.filter(function(id){return id!==p.id;}) : eligible.concat([p.id]);
+                            update({individualProps:individualProps.map(function(x) { return x.id===prop.id ? Object.assign({},x,{eligible:ne}) : x; })});
+                          }} style={Object.assign({}, S.pillBtn, isIn ? {background:"rgba(34,197,94,0.2)", borderColor:"#22c55e", color:"#22c55e"} : {opacity:0.6})}>{(isIn?"✓ ":"")+p.emoji+" "+p.name.split(" ")[0]}</button>;
+                        })}
+                      </div>
+                      {eligible.length > 0 && (
+                        <div>
+                          <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginBottom:4}}>Settle — tap the winner:</div>
+                          <div style={{display:"flex", gap:4, flexWrap:"wrap"}}>
+                            {eligible.map(function(pid) {
+                              var p = players.find(function(x){return x.id===pid;});
+                              return <button key={pid} onClick={function() { update({individualProps:individualProps.map(function(x) { return x.id===prop.id ? Object.assign({},x,{settled:true,winner:pid}) : x; })}); }} style={Object.assign({}, S.pillBtn, {borderColor:"rgba(220,38,38,0.4)"})}>{p.emoji+" "+p.name.split(" ")[0]}</button>;
+                            })}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -2546,13 +2577,13 @@ function BetsTab(props) {
               <div style={{marginTop:12, padding:12, background:"rgba(40,69,112,0.15)", borderRadius:8}}>
                 <div style={{fontSize:13, fontWeight:700, color:"#fff", fontFamily:"system-ui", marginBottom:8}}>New Prop Bet</div>
                 <div style={Object.assign({}, S.label, {marginBottom:4})}>What's the bet?</div>
-                <input style={S.input} value={customPropName} onChange={function(e) { setCustomPropName(e.target.value); }} placeholder="e.g. First birdie of the trip"/>
+                <input style={S.input} value={customPropName} onChange={function(e) { setCustomPropName(e.target.value); }} placeholder="e.g. Lowest net at Portrush"/>
                 <div style={Object.assign({}, S.label, {marginBottom:4})}>Buy-in per player ($)</div>
                 <input style={Object.assign({}, S.input, {width:120})} value={customPropBuyin} onChange={function(e) { setCustomPropBuyin(e.target.value); }} type="number" placeholder="10"/>
                 <div style={{display:"flex", gap:8, marginTop:4}}>
                   <button style={Object.assign({}, S.primaryBtn, {flex:1, opacity:!customPropName.trim() ? 0.5 : 1})} onClick={function() {
                     if (!customPropName.trim()) return;
-                    var newProp = { id:"ip"+Date.now(), name:customPropName.trim(), desc:"", settled:false, winner:null, buyin:parseFloat(customPropBuyin)||10, isCustom:true };
+                    var newProp = { id:"ip"+Date.now(), name:customPropName.trim(), desc:"", settled:false, winner:null, buyin:parseFloat(customPropBuyin)||10, eligible:[], isCustom:true };
                     update({individualProps:individualProps.concat([newProp])});
                     setCustomPropName(""); setCustomPropBuyin("10"); setAddingProp(false);
                   }}>Create</button>
@@ -2564,7 +2595,7 @@ function BetsTab(props) {
         </div>
       )}
 
-      {tab === "match" && (
+      {false && tab === "match" && (
         <div>
           <div style={S.card}>
             <div style={S.cardTitle}>⚔️ WASPs vs Italians — Match Play</div>
