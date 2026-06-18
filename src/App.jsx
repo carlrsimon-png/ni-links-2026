@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "1.3";
+const APP_VERSION = "1.6";
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
 const AUTH_KEY = "ni-links-auth";
 const GROUP_PIN = "2026";
@@ -24,26 +24,31 @@ const COURSES = [
   { name:"Ardglass", location:"Ardglass, Co. Down", par:70, url:"https://ardglassgolfclub.com/",
     scorecard:"https://ardglassgolfclub.com/",
     note:"Founded 1896. Dramatic cliffs, 14th-century castle clubhouse.",
+    tees:[{label:"White",slope:117},{label:"Green",slope:121},{label:"Custom",slope:126}],
     pars:[4,3,4,4,3,4,3,4,5, 3,5,3,4,4,5,4,4,4],
     si:  [10,16,6,14,18,4,12,2,8, 13,3,7,1,11,15,5,9,17] },
   { name:"Royal County Down", location:"Newcastle, Co. Down", par:71, url:"https://www.royalcountydown.org/",
     scorecard:"https://www.royalcountydown.org/championship_links",
     note:"World Top 5. Old Tom Morris original. Mourne Mountains backdrop.",
+    tees:[{label:"Championship",slope:142},{label:"Medal",slope:131},{label:"Yellow",slope:134}],
     pars:[5,4,4,3,4,4,3,4,4, 3,4,5,4,3,4,4,4,5],
     si:  [8,2,4,14,10,6,16,12,18, 15,5,1,3,17,9,13,7,11] },
   { name:"Castlerock (Mussenden)", location:"Castlerock, Co. Derry", par:73, url:"https://www.castlerockgc.co.uk/",
     scorecard:"https://www.castlerockgc.co.uk/",
     note:"Est. 1901. 'Leg O'Mutton' par 3. Harry Colt design.",
+    tees:[{label:"White",slope:132},{label:"Yellow",slope:128},{label:"Custom",slope:132}],
     pars:[4,4,3,3,5,4,4,5,4, 4,5,4,4,3,5,4,4,4],
     si:  [6,2,14,10,4,8,12,16,18, 7,1,5,3,15,9,11,13,17] },
   { name:"Royal Portrush (Dunluce)", location:"Portrush, Co. Antrim", par:72, url:"https://www.royalportrushgolfclub.com/",
     scorecard:"https://www.royalportrushgolfclub.com/courses/the-dunluce/",
     note:"World Top 15. Host of The Open 1951, 2019 & 2025.",
+    tees:[{label:"Championship",slope:131},{label:"Visitor",slope:126},{label:"Custom",slope:136}],
     pars:[4,5,3,4,4,3,5,4,4, 4,4,5,3,4,4,3,4,5],
     si:  [6,10,16,2,8,14,4,12,18, 3,1,9,17,5,7,15,11,13] },
   { name:"Portstewart (Strand)", location:"Portstewart, Co. Derry", par:72, url:"https://www.portstewartgc.co.uk/",
     scorecard:"https://www.portstewartgc.co.uk/",
     note:"Willie Park / Des Giffin design. 'Thistly Hollow' dunes.",
+    tees:[{label:"White",slope:130},{label:"Yellow",slope:126},{label:"Custom",slope:130}],
     pars:[4,4,4,3,5,4,3,4,5, 4,3,5,4,4,4,4,4,4],
     si:  [8,4,2,14,6,10,16,12,18, 5,15,1,3,7,9,11,13,17] },
 ];
@@ -198,6 +203,7 @@ function defaultState() {
     teamMatches: [],
     drinks: {},
     expenses: [],
+    selectedTees: [0, 0, 0, 0, 0],
     weatherCache: null,
   };
 }
@@ -216,12 +222,13 @@ function getRoundScore(scores, pid, ri) {
   return f.length === 0 ? null : f.reduce(function(a, b) { return a + b; }, 0);
 }
 
+// Active slopes — updated from state when tees are selected. Defaults to first tee option per course.
+var ACTIVE_SLOPES = COURSES.map(function(c) { return c.tees[0].slope; });
+
 // Calculate course handicap from handicap index
 // Formula: HI × (Slope/113) rounded to nearest integer
 function getCourseHandicap(hi, courseIdx) {
-  // Slope ratings for each course (standard values)
-  var slopes = [126, 140, 132, 136, 130];
-  var slope = slopes[courseIdx] || 113;
+  var slope = ACTIVE_SLOPES[courseIdx] || 113;
   return Math.round(hi * (slope / 113));
 }
 
@@ -705,8 +712,11 @@ export default function App() {
         if (!merged.scores || Object.keys(merged.scores).length === 0) {
           merged.scores = initScores(merged.players);
         }
-        // Always use latest handicaps from code — overrides stale Firebase values
+        // Use latest handicaps from code to override stale Firebase values —
+        // UNLESS a handicap was manually edited in the app (handicapEdited flag),
+        // in which case the manual value is preserved.
         merged.players = merged.players.map(function(p) {
+          if (p.handicapEdited) return p; // manual edit wins
           var latest = DEFAULT_PLAYERS.find(function(d) { return d.id === p.id; });
           return latest ? Object.assign({}, p, { handicap: latest.handicap }) : p;
         });
@@ -734,6 +744,12 @@ export default function App() {
         }
         merged.bets = syncProps(DEFAULT_PROPS, merged.bets);
         merged.individualProps = syncProps(DEFAULT_INDIVIDUAL_PROPS, merged.individualProps);
+        // Update active slopes based on selected tees
+        var st = merged.selectedTees || [0,0,0,0,0];
+        COURSES.forEach(function(c, i) {
+          var ti = st[i] || 0;
+          if (ti >= 0 && ti < c.tees.length) ACTIVE_SLOPES[i] = c.tees[ti].slope;
+        });
         merged.players.forEach(function(p) {
           if (!merged.scores[p.id]) {
             merged.scores[p.id] = {};
@@ -755,6 +771,7 @@ export default function App() {
           teamMatches: fresh.teamMatches,
           drinks: fresh.drinks,
           expenses: fresh.expenses,
+          selectedTees: fresh.selectedTees,
         });
         setState(function(prev) { return Object.assign({}, prev, { initialized:true }); });
       }
@@ -837,7 +854,7 @@ export default function App() {
     setState(function(prev) {
       var next = Object.assign({}, prev, changes);
       // Save to Firebase (debounced to avoid hammering Firestore) — never for guests
-      if (!isGuestWrite && (changes.scores || changes.players || changes.games || changes.bets || changes.individualProps || changes.h2hBets || changes.teamMatches || changes.drinks || changes.expenses)) {
+      if (!isGuestWrite && (changes.scores || changes.players || changes.games || changes.bets || changes.individualProps || changes.h2hBets || changes.teamMatches || changes.drinks || changes.expenses || changes.selectedTees)) {
         clearTimeout(saveTimer.current);
         setSaveStatus("saving");
         saveTimer.current = setTimeout(function() {
@@ -851,6 +868,7 @@ export default function App() {
             teamMatches: next.teamMatches,
             drinks: next.drinks,
             expenses: next.expenses,
+            selectedTees: next.selectedTees,
           }).then(function() {
             setSaveStatus("saved");
             setTimeout(function() { setSaveStatus("idle"); }, 1500);
@@ -877,6 +895,7 @@ export default function App() {
       teamMatches: fresh.teamMatches,
       drinks: fresh.drinks,
       expenses: fresh.expenses,
+      selectedTees: fresh.selectedTees,
     });
   };
 
@@ -930,7 +949,7 @@ export default function App() {
       <div style={S.content}>
         {activeTab === "home" && <HomeTab players={players} lb={lb} currentPlayer={currentPlayer} weatherCache={state.weatherCache} update={update} isGuest={isGuest} />}
         {activeTab === "itinerary" && <ItineraryTab weatherCache={state.weatherCache} update={update} isGuest={isGuest} />}
-        {activeTab === "scores" && <ScoresTab players={players} scores={scores} sel={selectedRound} hole={scoringHole} setHole={setScoringHole} update={update} rs={rs} currentPlayer={currentPlayer} isGuest={isGuest} />}
+        {activeTab === "scores" && <ScoresTab players={players} scores={scores} sel={selectedRound} hole={scoringHole} setHole={setScoringHole} update={update} rs={rs} currentPlayer={currentPlayer} isGuest={isGuest} selectedTees={state.selectedTees || [0,0,0,0,0]} />}
         {activeTab === "leaderboard" && <LeaderboardTab players={players} scores={scores} lb={lb} rs={rs} currentPlayer={currentPlayer} />}
         {activeTab === "bets" && (isGuest ? (
           <div style={{padding:"60px 24px", textAlign:"center"}}>
@@ -1734,6 +1753,22 @@ function ScoresTab(props) {
         })}
       </div>
 
+      {/* Tee selector for the current course */}
+      <div style={{display:"flex", gap:4, padding:"0 16px", marginBottom:8, alignItems:"center"}}>
+        <span style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", fontWeight:600, marginRight:4}}>Tees:</span>
+        {course.tees.map(function(tee, ti) {
+          var selectedTees = props.selectedTees || [0,0,0,0,0];
+          var active = (selectedTees[sel] || 0) === ti;
+          return <button key={ti} onClick={function() {
+            if (props.isGuest) return;
+            var nt = (selectedTees).slice();
+            nt[sel] = ti;
+            ACTIVE_SLOPES[sel] = tee.slope;
+            update({selectedTees:nt});
+          }} style={Object.assign({}, S.pillBtn, {fontSize:11, padding:"4px 10px"}, active ? {background:"rgba(34,197,94,0.2)", borderColor:"#22c55e", color:"#22c55e"} : {})}>{tee.label+" ("+tee.slope+")"}</button>;
+        })}
+      </div>
+
       <div style={S.card}>
         <div style={S.cardTitle}>{course.name}</div>
         <div style={S.label}>{"Par "+course.par+" · "+course.location}</div>
@@ -1776,11 +1811,14 @@ function ScoresTab(props) {
         var ch = getCourseHandicap(player.handicap, sel);
         var net = gross !== null ? gross - ch : null;
         var frontTotal = 0, backTotal = 0, frontCount = 0, backCount = 0;
+        var frontNetTotal = 0, backNetTotal = 0;
         for (var hi = 0; hi < 18; hi++) {
           var hv = scores[player.id] && scores[player.id][sel] && scores[player.id][sel][hi];
           if (hv != null) {
-            if (hi < 9) { frontTotal += hv; frontCount++; }
-            else { backTotal += hv; backCount++; }
+            var hsi = course.si ? course.si[hi] : 99;
+            var netHv = hv - strokesOnHole(ch, hsi);
+            if (hi < 9) { frontTotal += hv; frontNetTotal += netHv; frontCount++; }
+            else { backTotal += hv; backNetTotal += netHv; backCount++; }
           }
         }
         return (
@@ -1805,11 +1843,12 @@ function ScoresTab(props) {
                 </div>
               </div>
             </div>
-            <div style={{display:"flex", gap:12, marginBottom:6}}>
-              <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>{"OUT: "+(frontCount>0?frontTotal:"—")}</div>
-              <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>{"IN: "+(backCount>0?backTotal:"—")}</div>
-              <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>{"CH: "+ch+" strokes"}</div>
-            </div>
+            {gross !== null && (
+              <div style={{display:"flex", gap:6, marginBottom:6, flexWrap:"wrap"}}>
+                <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui"}}>{"Gross — OUT: "+(frontCount>0?frontTotal:"—")+" IN: "+(backCount>0?backTotal:"—")}</div>
+                <div style={{fontSize:11, color:CL.red, fontFamily:"system-ui"}}>{"Net — OUT: "+(frontCount>0?frontNetTotal:"—")+" IN: "+(backCount>0?backNetTotal:"—")}</div>
+              </div>
+            )}
             <div style={{display:"grid", gridTemplateColumns:"repeat(9,1fr)", gap:3}}>
               {Array.from({length:18}, function(_,h) {
                 var val = scores[player.id] && scores[player.id][sel] && scores[player.id][sel][h];
@@ -2212,10 +2251,18 @@ function BetsTab(props) {
   function savePlayer() {
     if (!pName.trim()) return;
     if (editId) {
-      update({players:players.map(function(p) { return p.id===editId ? Object.assign({},p,{name:pName, handicap:parseFloat(pHcp)||0, emoji:pEmoji}) : p; })});
+      update({players:players.map(function(p) {
+        if (p.id !== editId) return p;
+        var newHcp = parseFloat(pHcp);
+        if (isNaN(newHcp)) newHcp = p.handicap;
+        // Mark as manually edited if the handicap changed, so the code force-sync
+        // won't overwrite it on the next load.
+        var edited = p.handicapEdited || newHcp !== p.handicap;
+        return Object.assign({}, p, {name:pName, handicap:newHcp, emoji:pEmoji, handicapEdited:edited});
+      })});
     } else {
       var nid = "p"+Date.now();
-      var newPlayer = {id:nid, name:pName, handicap:parseFloat(pHcp)||0, emoji:pEmoji};
+      var newPlayer = {id:nid, name:pName, handicap:parseFloat(pHcp)||0, emoji:pEmoji, handicapEdited:true};
       // Initialize empty score arrays for the new player
       var updatedScores = JSON.parse(JSON.stringify(props.scores || {}));
       updatedScores[nid] = {};
@@ -2898,11 +2945,12 @@ function BetsTab(props) {
       {tab === "players" && (
         <div>
           <div style={S.card}>
-            <div style={S.cardTitle}>Roster</div>
+            <div style={S.cardTitle}>Roster & Handicaps</div>
+            <div style={Object.assign({}, S.label, {marginBottom:8})}>Tap ✏️ to update a player's handicap index. Changes apply to all scoring instantly and sync to everyone.</div>
             {players.map(function(p) {
               return (
                 <div key={p.id} style={Object.assign({display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 0", fontSize:14}, S.separator)}>
-                  <span><span style={{marginRight:8}}>{p.emoji}</span><span style={{fontWeight:600, color:"#fff"}}>{p.name}</span><span style={{color:CL.muted, fontFamily:"system-ui", fontSize:12}}>{" · HCP "+p.handicap}</span></span>
+                  <span><span style={{marginRight:8}}>{p.emoji}</span><span style={{fontWeight:600, color:"#fff"}}>{p.name}</span><span style={{color:CL.muted, fontFamily:"system-ui", fontSize:12}}>{" · HCP "+p.handicap}</span>{p.handicapEdited && <span style={{color:"#22c55e", fontFamily:"system-ui", fontSize:10, marginLeft:6}}>✎ edited</span>}</span>
                   <div style={{display:"flex", gap:8}}>
                     <button style={{background:"none", border:"none", cursor:"pointer", fontSize:14}} onClick={function() { setEditId(p.id); setPName(p.name); setPHcp(p.handicap.toString()); setPEmoji(p.emoji); }}>✏️</button>
                     <button style={{background:"none", border:"none", cursor:"pointer", fontSize:14}} onClick={function() { if (players.length<=2) return; update({players:players.filter(function(x) { return x.id!==p.id; })}); }}>🗑</button>
