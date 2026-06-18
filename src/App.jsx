@@ -2,12 +2,16 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "1.8";
+const APP_VERSION = "2.0";
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
 const AUTH_KEY = "ni-links-auth";
 const GROUP_PIN = "2026";
 // Only these players (Brian Smith, Carl Simon) can edit Bets & Expenses — the "gatekeepers" of the books.
 const BOOKKEEPER_IDS = ["p2", "p6"];
+
+// Gross Stableford group names — two distinct Northern Ireland landmarks.
+const GROSS_GROUP_A = { name:"The Mournes", emoji:"⛰️" };   // Mountains of Mourne, Co. Down (low handicaps)
+const GROSS_GROUP_B = { name:"The Causeway", emoji:"🌊" };   // Giant's Causeway, Co. Antrim (high handicaps)
 
 const ITINERARY = [
   { day:0, date:"Fri, Jun 26", title:"Depart USA", type:"travel", description:"JetBlue Flight 841 · JFK → Dublin. Evening departure.", hotel:null, events:[{time:"Evening",name:"JetBlue B6 841",detail:"JFK → DUB · Economy",icon:"✈️"}] },
@@ -106,13 +110,13 @@ const DEFAULT_PROPS = [];
 
 // Individual prop bets — player-selectable eligibility, net scoring
 const DEFAULT_INDIVIDUAL_PROPS = [
-  { id:"ip8", name:"Most Net Stableford Points (Trip)", desc:"Highest total net Stableford across all 5 rounds", settled:false, winner:null, buyin:10, eligible:[] },
-  { id:"ipsf0", name:"Most Net Stableford — Ardglass", desc:"Most net Stableford points at Ardglass", settled:false, winner:null, buyin:10, eligible:[] },
-  { id:"ipsf1", name:"Most Net Stableford — Royal County Down", desc:"Most net Stableford points at Royal County Down", settled:false, winner:null, buyin:10, eligible:[] },
-  { id:"ipsf2", name:"Most Net Stableford — Castlerock", desc:"Most net Stableford points at Castlerock", settled:false, winner:null, buyin:10, eligible:[] },
-  { id:"ipsf3", name:"Most Net Stableford — Royal Portrush", desc:"Most net Stableford points at Royal Portrush", settled:false, winner:null, buyin:10, eligible:[] },
-  { id:"ipsf4", name:"Most Net Stableford — Portstewart", desc:"Most net Stableford points at Portstewart", settled:false, winner:null, buyin:10, eligible:[] },
-  { id:"ip1", name:"Lowest Net Score (Trip)", desc:"Best net total across all 5 rounds", settled:false, winner:null, buyin:10, eligible:[] },
+  { id:"ip8", name:"Most Net Stableford Points (Trip)", desc:"Highest total net Stableford across all 5 rounds", settled:false, winner:null, buyin:20, eligible:[] },
+  { id:"ipsf0", name:"Most Net Stableford — Ardglass", desc:"Most net Stableford points at Ardglass", settled:false, winner:null, buyin:20, eligible:[] },
+  { id:"ipsf1", name:"Most Net Stableford — Royal County Down", desc:"Most net Stableford points at Royal County Down", settled:false, winner:null, buyin:20, eligible:[] },
+  { id:"ipsf2", name:"Most Net Stableford — Castlerock", desc:"Most net Stableford points at Castlerock", settled:false, winner:null, buyin:20, eligible:[] },
+  { id:"ipsf3", name:"Most Net Stableford — Royal Portrush", desc:"Most net Stableford points at Royal Portrush", settled:false, winner:null, buyin:20, eligible:[] },
+  { id:"ipsf4", name:"Most Net Stableford — Portstewart", desc:"Most net Stableford points at Portstewart", settled:false, winner:null, buyin:20, eligible:[] },
+  { id:"ip1", name:"Lowest Net Score (Trip)", desc:"Best net total across all 5 rounds", settled:false, winner:null, buyin:20, eligible:[] },
 ];
 
 const DEFAULT_TEAM_MATCHES = [
@@ -329,6 +333,11 @@ function getTotalStableford(scores, pid, handicap) {
   return any ? t : null;
 }
 
+// GROSS Stableford — same scoring but no strokes given (handicap = 0).
+function getTotalGrossStableford(scores, pid) {
+  return getTotalStableford(scores, pid, 0);
+}
+
 // Team Stableford for a round — sum of the best N scores on the team that round.
 // bestN = how many scores count (e.g. 2 of 4). Default: all count.
 function getTeamRoundStableford(scores, players, teamIds, ri, bestN) {
@@ -473,7 +482,7 @@ function calculateSettleUp(players, games, bets, h2hBets, teamMatches, individua
   if (individualProps) {
     individualProps.forEach(function(prop) {
       if (!prop.settled || !prop.winner) return;
-      var buyin = prop.buyin || 10;
+      var buyin = prop.buyin || 20;
       players.forEach(function(p) {
         if (p.id === prop.winner) balances[p.id] = (balances[p.id] || 0) + (buyin * (players.length - 1));
         else balances[p.id] = (balances[p.id] || 0) - buyin;
@@ -853,15 +862,25 @@ export default function App() {
   var update = useCallback(function(changes) {
     // Master guard: guests can never write synced data to Firebase.
     var isGuestWrite = guestRef.current;
-    // Book guard: only gatekeepers may write bet/expense data. Strip those changes
-    // for everyone else (scores/players/etc. remain editable by all players).
-    if (!canEditBooksRef.current) {
-      var bookFields = ["games", "bets", "individualProps", "h2hBets", "teamMatches", "drinks", "expenses", "customBets"];
+    // Book guard: only gatekeepers may write most bet/expense data. Strip those
+    // changes for everyone else. EXCEPTION: h2hBets — any signed-in player may
+    // join/leave a head-to-head bet (create/delete/settle stays gatekeeper-only,
+    // enforced in the H2H UI). Guests still can't write anything.
+    if (!canEditBooksRef.current && !isGuestWrite) {
+      var bookFields = ["games", "bets", "individualProps", "teamMatches", "drinks", "expenses", "customBets"];
       var stripped = false;
       bookFields.forEach(function(f) {
         if (Object.prototype.hasOwnProperty.call(changes, f)) { delete changes[f]; stripped = true; }
       });
       if (stripped && Object.keys(changes).length === 0) return; // nothing left to apply
+    } else if (!canEditBooksRef.current) {
+      // Guests: strip everything including h2hBets
+      var bookFields2 = ["games", "bets", "individualProps", "h2hBets", "teamMatches", "drinks", "expenses", "customBets"];
+      var stripped2 = false;
+      bookFields2.forEach(function(f) {
+        if (Object.prototype.hasOwnProperty.call(changes, f)) { delete changes[f]; stripped2 = true; }
+      });
+      if (stripped2 && Object.keys(changes).length === 0) return;
     }
     setState(function(prev) {
       var next = Object.assign({}, prev, changes);
@@ -961,7 +980,7 @@ export default function App() {
       <div style={S.content}>
         {activeTab === "home" && <HomeTab players={players} lb={lb} currentPlayer={currentPlayer} weatherCache={state.weatherCache} update={update} isGuest={isGuest} />}
         {activeTab === "itinerary" && <ItineraryTab weatherCache={state.weatherCache} update={update} isGuest={isGuest} />}
-        {activeTab === "scores" && <ScoresTab players={players} scores={scores} sel={selectedRound} hole={scoringHole} setHole={setScoringHole} update={update} rs={rs} currentPlayer={currentPlayer} isGuest={isGuest} selectedTees={state.selectedTees || [0,0,0,0,0]} />}
+        {activeTab === "scores" && <ScoresTab players={players} scores={scores} sel={selectedRound} hole={scoringHole} setHole={setScoringHole} update={update} rs={rs} currentPlayer={currentPlayer} isGuest={isGuest} canEditBooks={canEditBooks} selectedTees={state.selectedTees || [0,0,0,0,0]} />}
         {activeTab === "leaderboard" && <LeaderboardTab players={players} scores={scores} lb={lb} rs={rs} currentPlayer={currentPlayer} />}
         {activeTab === "bets" && (isGuest ? (
           <div style={{padding:"60px 24px", textAlign:"center"}}>
@@ -1607,6 +1626,22 @@ function ScoresTab(props) {
   var sd = useState(null); var scanData = sd[0], setScanData = sd[1];
   var sl = useState(false); var scanLoading = sl[0], setScanLoading = sl[1];
   var se = useState(null); var scanErr = se[0], setScanErr = se[1];
+  // Handicap editor (relocated from Bets)
+  var hceOpen = useState(false); var hcEditorOpen = hceOpen[0], setHcEditorOpen = hceOpen[1];
+  var hceId = useState(null); var hcEditId = hceId[0], setHcEditId = hceId[1];
+  var hceVal = useState(""); var hcVal = hceVal[0], setHcVal = hceVal[1];
+
+  function saveHandicap() {
+    if (props.isGuest || !hcEditId) return;
+    var nv = parseFloat(hcVal);
+    if (isNaN(nv)) { setHcEditId(null); setHcVal(""); return; }
+    update({players:players.map(function(p) {
+      if (p.id !== hcEditId) return p;
+      var edited = p.handicapEdited || nv !== p.handicap;
+      return Object.assign({}, p, {handicap:nv, handicapEdited:edited});
+    })});
+    setHcEditId(null); setHcVal("");
+  }
 
   function setScore(pid, h, val) {
     if (props.isGuest) return;
@@ -1882,6 +1917,38 @@ function ScoresTab(props) {
           </div>
         );
       })}
+
+      {/* Handicap editor — gatekeepers only (relocated from Bets) */}
+      {props.canEditBooks && (
+        <div style={S.card}>
+          <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", cursor:"pointer"}} onClick={function() { setHcEditorOpen(!hcEditorOpen); }}>
+            <div style={S.cardTitle}>✏️ Edit Handicaps</div>
+            <div style={{fontSize:18, color:CL.muted}}>{hcEditorOpen ? "▾" : "▸"}</div>
+          </div>
+          {hcEditorOpen && (
+            <div style={{marginTop:8}}>
+              <div style={Object.assign({}, S.label, {marginBottom:8})}>Update a player's handicap index. Changes apply to all scoring instantly and sync to everyone.</div>
+              {players.map(function(p) {
+                var editing = hcEditId === p.id;
+                return (
+                  <div key={p.id} style={Object.assign({display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 0", fontSize:14}, S.separator)}>
+                    <span><span style={{marginRight:8}}>{p.emoji}</span><span style={{fontWeight:600, color:"#fff"}}>{p.name}</span><span style={{color:CL.muted, fontFamily:"system-ui", fontSize:12}}>{" · HCP "+p.handicap}</span>{p.handicapEdited && <span style={{color:"#22c55e", fontFamily:"system-ui", fontSize:10, marginLeft:6}}>✎ edited</span>}</span>
+                    {editing ? (
+                      <div style={{display:"flex", gap:6, alignItems:"center"}}>
+                        <input style={Object.assign({}, S.input, {width:70, margin:0, padding:"6px 8px"})} value={hcVal} onChange={function(e) { setHcVal(e.target.value); }} type="number" step="0.1" autoFocus/>
+                        <button style={{background:CL.red, color:"#fff", border:"none", borderRadius:4, padding:"6px 12px", fontSize:12, cursor:"pointer", fontFamily:"system-ui"}} onClick={saveHandicap}>Save</button>
+                        <button style={{background:"none", color:CL.muted, border:"1px solid "+CL.border, borderRadius:4, padding:"6px 10px", fontSize:12, cursor:"pointer", fontFamily:"system-ui"}} onClick={function() { setHcEditId(null); setHcVal(""); }}>✕</button>
+                      </div>
+                    ) : (
+                      <button style={{background:"none", border:"none", cursor:"pointer", fontSize:14}} onClick={function() { setHcEditId(p.id); setHcVal(p.handicap.toString()); }}>✏️</button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       {hole && (
         <div style={S.modal} onClick={function() { setHole(null); }}>
@@ -2178,7 +2245,7 @@ function BetsTab(props) {
   var h2hP2 = useState(null); var opponent = h2hP2[0], setOpponent = h2hP2[1];
   var h2hCrs = useState(""); var h2hCourse = h2hCrs[0], setH2hCourse = h2hCrs[1];
   var cpName = useState(""); var customPropName = cpName[0], setCustomPropName = cpName[1];
-  var cpBuyin = useState("10"); var customPropBuyin = cpBuyin[0], setCustomPropBuyin = cpBuyin[1];
+  var cpBuyin = useState("20"); var customPropBuyin = cpBuyin[0], setCustomPropBuyin = cpBuyin[1];
   var cpAdding = useState(false); var addingProp = cpAdding[0], setAddingProp = cpAdding[1];
   // Player management
   var pns = useState(""); var pName = pns[0], setPName = pns[1];
@@ -2204,7 +2271,7 @@ function BetsTab(props) {
     // Add individual prop bet winnings
     individualProps.forEach(function(prop) {
       if (!prop.settled || !prop.winner) return;
-      var buyin = prop.buyin || 10;
+      var buyin = prop.buyin || 20;
       if (pid === prop.winner) total += buyin * (players.length - 1);
       else total -= buyin;
     });
@@ -2284,12 +2351,12 @@ function BetsTab(props) {
     setPName(""); setPHcp(""); setPEmoji("🔴"); setEditId(null);
   }
 
-  var subTabs = [{id:"team",label:"🏆 Team"},{id:"ind",label:"⛳ Ind"},{id:"props",label:"🎯 Props"},{id:"h2h",label:"🤝 H2H"},{id:"games",label:"Games"},{id:"settle",label:"💸 Settle"},{id:"drinks",label:"🍺"},{id:"players",label:"👥"}];
+  var subTabs = [{id:"team",label:"🏆 Team"},{id:"ind",label:"⛳ Ind"},{id:"props",label:"🎯 Props"},{id:"h2h",label:"🤝 H2H"},{id:"games",label:"Games"},{id:"settle",label:"💸 Settle"},{id:"drinks",label:"🍺"}];
 
   return (
     <div>
       <div style={S.pageHeader}><div style={S.pageTitle}>Bets & Games</div></div>
-      {props.isGuest && <div style={{margin:"0 16px 8px", padding:"8px 12px", background:"rgba(111,172,255,0.1)", border:"1px solid "+CL.border, borderRadius:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>👁️ View only — Brian & Carl manage the books. Talk to them to record a bet.</div>}
+      {props.isGuest && <div style={{margin:"0 16px 8px", padding:"8px 12px", background:"rgba(111,172,255,0.1)", border:"1px solid "+CL.border, borderRadius:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>👁️ Brian & Carl manage the books — but you can Jump In on H2H bets yourself.</div>}
       <div style={{display:"flex", gap:4, padding:"0 16px", marginBottom:8}}>
         {subTabs.map(function(t) { return <button key={t.id} onClick={function() { setTab(t.id); }} style={Object.assign({}, S.subTab, tab===t.id ? S.subTabOn : S.subTabOff)}>{t.label}</button>; })}
       </div>
@@ -2318,7 +2385,7 @@ function BetsTab(props) {
             });
             individualProps.forEach(function(prop) {
               if (!prop.settled || !prop.winner) return;
-              var buyin = prop.buyin || 10;
+              var buyin = prop.buyin || 20;
               if (pid === prop.winner) total += buyin * (players.length - 1);
               else total -= buyin;
             });
@@ -2440,32 +2507,31 @@ function BetsTab(props) {
         var brackets = getGrossBrackets(players);
         function bracketRows(ids) {
           return ids.map(function(pid) {
-            var p = players.find(function(x) { return x.id === pid; });
-            return { p:p, gross:getTotalGross(scores, pid) };
+            return { p:players.find(function(x) { return x.id === pid; }), pts:getTotalGrossStableford(scores, pid) };
           }).sort(function(a, b) {
-            if (a.gross === null) return 1;
-            if (b.gross === null) return -1;
-            return a.gross - b.gross;
+            if (a.pts === null) return 1;
+            if (b.pts === null) return -1;
+            return b.pts - a.pts; // higher gross Stableford wins
           });
         }
-        function renderBracket(label, ids) {
+        function renderBracket(label, emoji, ids) {
           var rows = bracketRows(ids);
           var pot = ids.length * 50;
-          var played = rows.filter(function(r) { return r.gross !== null; });
-          var leaderGross = played.length ? played[0].gross : null;
+          var played = rows.filter(function(r) { return r.pts !== null; });
+          var leaderPts = played.length ? played[0].pts : null;
           return (
             <div style={{marginBottom:14}}>
               <div style={{display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:6}}>
-                <div style={{fontSize:14, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{label}</div>
+                <div style={{fontSize:14, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{emoji+" "+label}</div>
                 <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", fontWeight:600}}>{"$50/man · $"+pot+" winner-take-all"}</div>
               </div>
               {rows.map(function(r, i) {
-                var isLeader = r.gross !== null && r.gross === leaderGross;
+                var isLeader = r.pts !== null && r.pts === leaderPts;
                 return (
                   <div key={r.p.id} style={Object.assign({display:"flex", alignItems:"center", padding:"7px 0", gap:10}, i<rows.length-1?S.separator:{}, isLeader?{background:"rgba(34,197,94,0.08)", margin:"0 -8px", padding:"7px 8px", borderRadius:6}:{})}>
                     <div style={{fontSize:15}}>{r.p.emoji}</div>
                     <div style={{flex:1, fontSize:14, color:"#fff", fontFamily:"system-ui"}}>{r.p.name}<span style={{color:CL.muted, fontSize:11}}>{" ("+r.p.handicap+")"}</span></div>
-                    <div style={{fontSize:16, fontWeight:700, color:isLeader?"#22c55e":"#fff", fontFamily:"system-ui"}}>{r.gross !== null ? r.gross : "—"}</div>
+                    <div style={{fontSize:16, fontWeight:700, color:isLeader?"#22c55e":"#fff", fontFamily:"system-ui"}}>{r.pts !== null ? r.pts : "—"}</div>
                   </div>
                 );
               })}
@@ -2475,11 +2541,11 @@ function BetsTab(props) {
         return (
           <div>
             <div style={S.card}>
-              <div style={S.cardTitle}>⛳ Individual Gross — Groups A & B</div>
-              <div style={Object.assign({}, S.label, {marginBottom:12})}>Lowest total GROSS strokes across all 5 rounds wins each group. Winner takes the whole pot.</div>
-              {renderBracket("Group A — Low Handicaps", brackets.a)}
-              {renderBracket("Group B — High Handicaps", brackets.b)}
-              <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", textAlign:"center"}}>Groups set by handicap index · gross (no strokes given)</div>
+              <div style={S.cardTitle}>⛳ Individual Gross Stableford</div>
+              <div style={Object.assign({}, S.label, {marginBottom:12})}>Most GROSS Stableford points across all 5 rounds wins each group. Winner takes the whole pot.</div>
+              {renderBracket(GROSS_GROUP_A.name, GROSS_GROUP_A.emoji, brackets.a)}
+              {renderBracket(GROSS_GROUP_B.name, GROSS_GROUP_B.emoji, brackets.b)}
+              <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", textAlign:"center"}}>Groups split by handicap · gross Stableford (no strokes given) · Eagle 4 · Birdie 3 · Par 2 · Bogey 1</div>
             </div>
           </div>
         );
@@ -2494,7 +2560,7 @@ function BetsTab(props) {
             {individualProps.map(function(prop) {
               var winner = players.find(function(x) { return x.id === prop.winner; });
               var eligible = prop.eligible || [];
-              var pot = (prop.buyin || 10) * eligible.length;
+              var pot = (prop.buyin || 20) * eligible.length;
               // Compute the current NET leader among eligible players.
               // Stableford-style props (ip8 / ipsf*) use net Stableford points;
               // everything else uses net total score (lower is better).
@@ -2530,7 +2596,7 @@ function BetsTab(props) {
                     <div style={{flex:1}}>
                       <div style={{fontSize:15, fontWeight:600, color:prop.settled?CL.muted:"#fff", textDecoration:prop.settled?"line-through":"none"}}>{prop.name}</div>
                       {prop.desc && <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", marginTop:2}}>{prop.desc}</div>}
-                      <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginTop:2}}>{"$"+(prop.buyin||10)+"/player · "+eligible.length+" in · $"+pot+" pot"}</div>
+                      <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginTop:2}}>{"$"+(prop.buyin||20)+"/player · "+eligible.length+" in · $"+pot+" pot"}</div>
                       {leader && <div style={{fontSize:12, color:CL.blue, fontFamily:"system-ui", marginTop:3}}>{leader.tied ? "Tied: "+leader.tiedPlayers.map(function(t){return t.player.name.split(" ")[0];}).join(", ")+" ("+leader.val+(leader.higherWins?" pts)":" net)") : "Leading: "+leader.player.emoji+" "+leader.player.name.split(" ")[0]+" ("+leader.val+(leader.higherWins?" pts)":" net)")}</div>}
                     </div>
                     {!prop.settled && <button onClick={function() { if (confirm("Delete this prop?")) update({individualProps:individualProps.filter(function(x) { return x.id!==prop.id; })}); }} style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:14, flexShrink:0}}>🗑</button>}
@@ -2579,11 +2645,11 @@ function BetsTab(props) {
                 <div style={Object.assign({}, S.label, {marginBottom:4})}>What's the bet?</div>
                 <input style={S.input} value={customPropName} onChange={function(e) { setCustomPropName(e.target.value); }} placeholder="e.g. Lowest net at Portrush"/>
                 <div style={Object.assign({}, S.label, {marginBottom:4})}>Buy-in per player ($)</div>
-                <input style={Object.assign({}, S.input, {width:120})} value={customPropBuyin} onChange={function(e) { setCustomPropBuyin(e.target.value); }} type="number" placeholder="10"/>
+                <input style={Object.assign({}, S.input, {width:120})} value={customPropBuyin} onChange={function(e) { setCustomPropBuyin(e.target.value); }} type="number" placeholder="20"/>
                 <div style={{display:"flex", gap:8, marginTop:4}}>
                   <button style={Object.assign({}, S.primaryBtn, {flex:1, opacity:!customPropName.trim() ? 0.5 : 1})} onClick={function() {
                     if (!customPropName.trim()) return;
-                    var newProp = { id:"ip"+Date.now(), name:customPropName.trim(), desc:"", settled:false, winner:null, buyin:parseFloat(customPropBuyin)||10, eligible:[], isCustom:true };
+                    var newProp = { id:"ip"+Date.now(), name:customPropName.trim(), desc:"", settled:false, winner:null, buyin:parseFloat(customPropBuyin)||20, eligible:[], isCustom:true };
                     update({individualProps:individualProps.concat([newProp])});
                     setCustomPropName(""); setCustomPropBuyin("10"); setAddingProp(false);
                   }}>Create</button>
@@ -2664,7 +2730,7 @@ function BetsTab(props) {
         <div>
           <div style={S.card}>
             <div style={S.cardTitle}>⚔️ Head-to-Head Bets</div>
-            <div style={Object.assign({}, S.label, {marginBottom:12})}>Pick sides. Anyone can Jump In on either side — 2, 4, or more players. Losers pay winners, split evenly.</div>
+            <div style={Object.assign({}, S.label, {marginBottom:12})}>Anyone can Jump In on either side — tap to join a bet. Brian & Carl create and settle. Losers pay winners, split evenly.</div>
 
             {h2hBets.map(function(bet) {
               var sideA = bet.sideA || [bet.bettor];
@@ -2737,7 +2803,7 @@ function BetsTab(props) {
                       <div style={{fontSize:15, fontWeight:600, color:bet.settled?CL.muted:"#fff", textDecoration:bet.settled?"line-through":"none"}}>{bet.description}</div>
                       <div style={{fontSize:13, color:CL.red, fontFamily:"system-ui"}}>{"$"+bet.stake+"/person · $"+totalPot+" pot"}</div>
                     </div>
-                    {!bet.settled && <button style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:14, flexShrink:0}} onClick={function() { if (confirm("Delete this bet?")) update({h2hBets:h2hBets.filter(function(b) { return b.id!==bet.id; })}); }}>🗑</button>}
+                    {!bet.settled && props.canEdit && <button style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:14, flexShrink:0}} onClick={function() { if (confirm("Delete this bet?")) update({h2hBets:h2hBets.filter(function(b) { return b.id!==bet.id; })}); }}>🗑</button>}
                   </div>
 
                   {/* Sides display with named players */}
@@ -2777,13 +2843,17 @@ function BetsTab(props) {
                       <div style={{fontSize:14, color:"#22c55e", fontFamily:"system-ui"}}>
                         {"🏆 Side "+(winSide==="a"?"A":"B")+" wins! Each winner gets $"+Math.round(bet.stake * (winSide==="a"?sideB:sideA).length / (winSide==="a"?sideA:sideB).length)}
                       </div>
-                      <button onClick={function() { update({h2hBets:h2hBets.map(function(b) { return b.id===bet.id ? Object.assign({}, b, {settled:false, winningSide:null, winner:null}) : b; })}); }} style={{marginTop:6, fontSize:11, color:CL.muted, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:6, padding:"5px 12px", cursor:"pointer"}}>↩ Undo — reopen bet</button>
+                      {props.canEdit && <button onClick={function() { update({h2hBets:h2hBets.map(function(b) { return b.id===bet.id ? Object.assign({}, b, {settled:false, winningSide:null, winner:null}) : b; })}); }} style={{marginTop:6, fontSize:11, color:CL.muted, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:6, padding:"5px 12px", cursor:"pointer"}}>↩ Undo — reopen bet</button>}
                     </div>
                   ) : (
+                    props.canEdit ? (
                     <div style={{display:"flex", gap:6, marginTop:8}}>
                       <button onClick={function() { settleBet("a"); }} style={Object.assign({}, S.pillBtn, {flex:1, textAlign:"center", padding:"8px 0", borderColor:"rgba(220,38,38,0.4)"})}>Side A wins</button>
                       <button onClick={function() { settleBet("b"); }} style={Object.assign({}, S.pillBtn, {flex:1, textAlign:"center", padding:"8px 0", borderColor:"rgba(37,99,235,0.4)"})}>Side B wins</button>
                     </div>
+                    ) : (
+                    <div style={{marginTop:8, fontSize:11, color:CL.muted, fontFamily:"system-ui", textAlign:"center"}}>Brian or Carl settles the result</div>
+                    )
                   )}
                 </div>
               );
@@ -2792,6 +2862,7 @@ function BetsTab(props) {
             {h2hBets.length === 0 && <div style={{textAlign:"center", padding:16, color:CL.muted, fontFamily:"system-ui", fontSize:13}}>No bets yet. Create one below.</div>}
           </div>
 
+          {props.canEdit && (
           <div style={S.card}>
             <div style={S.cardTitle}>+ New Head-to-Head Bet</div>
 
@@ -2835,6 +2906,7 @@ function BetsTab(props) {
               setH2hText(""); setH2hAmt(""); setBettor(null); setOpponent(null); setH2hCourse("");
             }}>Create Bet</button>
           </div>
+          )}
         </div>
       )}
 
@@ -2925,6 +2997,11 @@ function BetsTab(props) {
               );
             })}
           </div>
+          {!props.isGuest && (
+            <div style={Object.assign({}, S.card, {borderColor:"#7f1d1d"})}>
+              <button style={{width:"100%", padding:12, background:"#7f1d1d", color:"#fff", border:"none", borderRadius:6, fontSize:13, cursor:"pointer", fontFamily:"system-ui"}} onClick={resetAll}>Reset All Data</button>
+            </div>
+          )}
         </div>
       )}
 
@@ -2969,37 +3046,6 @@ function BetsTab(props) {
                 </div>
               );
             })}
-          </div>
-        </div>
-      )}
-
-      {tab === "players" && (
-        <div>
-          <div style={S.card}>
-            <div style={S.cardTitle}>Roster & Handicaps</div>
-            <div style={Object.assign({}, S.label, {marginBottom:8})}>Tap ✏️ to update a player's handicap index. Changes apply to all scoring instantly and sync to everyone.</div>
-            {players.map(function(p) {
-              return (
-                <div key={p.id} style={Object.assign({display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 0", fontSize:14}, S.separator)}>
-                  <span><span style={{marginRight:8}}>{p.emoji}</span><span style={{fontWeight:600, color:"#fff"}}>{p.name}</span><span style={{color:CL.muted, fontFamily:"system-ui", fontSize:12}}>{" · HCP "+p.handicap}</span>{p.handicapEdited && <span style={{color:"#22c55e", fontFamily:"system-ui", fontSize:10, marginLeft:6}}>✎ edited</span>}</span>
-                  <div style={{display:"flex", gap:8}}>
-                    <button style={{background:"none", border:"none", cursor:"pointer", fontSize:14}} onClick={function() { setEditId(p.id); setPName(p.name); setPHcp(p.handicap.toString()); setPEmoji(p.emoji); }}>✏️</button>
-                    <button style={{background:"none", border:"none", cursor:"pointer", fontSize:14}} onClick={function() { if (players.length<=2) return; update({players:players.filter(function(x) { return x.id!==p.id; })}); }}>🗑</button>
-                  </div>
-                </div>
-              );
-            })}
-            <div style={{marginTop:12, paddingTop:12, borderTop:"1px solid "+CL.border}}>
-              <input style={S.input} value={pName} onChange={function(e) { setPName(e.target.value); }} placeholder="Name"/>
-              <input style={S.input} value={pHcp} onChange={function(e) { setPHcp(e.target.value); }} placeholder="Handicap" type="number"/>
-              <div style={{display:"flex", gap:6, marginBottom:12}}>
-                {EMOJIS.map(function(e) { return <button key={e} onClick={function() { setPEmoji(e); }} style={{fontSize:20, padding:6, background:"none", border:"2px solid "+(pEmoji===e?CL.red:"transparent"), borderRadius:6, cursor:"pointer"}}>{e}</button>; })}
-              </div>
-              <button style={S.primaryBtn} onClick={savePlayer}>{editId ? "Update" : "Add Player"}</button>
-            </div>
-          </div>
-          <div style={Object.assign({}, S.card, {borderColor:"#7f1d1d"})}>
-            <button style={{width:"100%", padding:12, background:"#7f1d1d", color:"#fff", border:"none", borderRadius:6, fontSize:13, cursor:"pointer", fontFamily:"system-ui"}} onClick={resetAll}>Reset All Data</button>
           </div>
         </div>
       )}
