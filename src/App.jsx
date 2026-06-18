@@ -2120,13 +2120,13 @@ function LeaderboardTab(props) {
         {views.map(function(v) { return <button key={v.id} onClick={function() { setView(v.id); }} style={Object.assign({}, S.subTab, view===v.id ? S.subTabOn : S.subTabOff)}>{v.label}</button>; })}
       </div>
 
-      {view === "individual" && (
-        sortedPlayers.length === 0 ? <div style={S.card}><div style={{textAlign:"center", color:CL.muted, padding:24, fontSize:14, fontFamily:"system-ui"}}>No scores yet.</div></div> : (function() {
+      {view === "individual" && (function() {
           // ─── Masters-style scoreboard ─────────────────────────────
           var toPar = function(v) { return v === 0 ? "E" : v > 0 ? "+"+v : ""+v; };
           var parClr = function(v) { return v < 0 ? "#f0454a" : v > 0 ? "#6facff" : "#fff"; };
           // Compute each player's per-round differential and total to par
-          var rows = sortedPlayers.map(function(p) {
+          // Use ALL players — show the shell even with no scores
+          var allRows = players.map(function(p) {
             var rounds = []; var totalToPar = 0; var roundsPlayed = 0;
             COURSES.forEach(function(c, ci) {
               var r = getPlayerRoundScore(p.id, ci);
@@ -2135,15 +2135,23 @@ function LeaderboardTab(props) {
             });
             return { p:p, rounds:rounds, totalToPar:totalToPar, roundsPlayed:roundsPlayed };
           });
-          // Assign positions with ties (T1, T2, etc.)
+          // Sort: players with scores first (by total), then players without scores
+          var rows = allRows.sort(function(a, b) {
+            if (a.roundsPlayed > 0 && b.roundsPlayed === 0) return -1;
+            if (a.roundsPlayed === 0 && b.roundsPlayed > 0) return 1;
+            if (a.roundsPlayed === 0 && b.roundsPlayed === 0) return 0;
+            return a.totalToPar - b.totalToPar;
+          });
+          // Assign positions with ties (T1, T2, etc.) — only for players with scores
           var positions = []; var pos = 1;
           for (var ri2 = 0; ri2 < rows.length; ri2++) {
-            if (ri2 > 0 && rows[ri2].totalToPar === rows[ri2-1].totalToPar) { positions.push(positions[ri2-1]); }
+            if (rows[ri2].roundsPlayed === 0) { positions.push(null); }
+            else if (ri2 > 0 && rows[ri2-1].roundsPlayed > 0 && rows[ri2].totalToPar === rows[ri2-1].totalToPar) { positions.push(positions[ri2-1]); }
             else { positions.push(pos); }
-            pos = ri2 + 2;
+            if (rows[ri2].roundsPlayed > 0) pos = ri2 + 2;
           }
           var hasTies = {};
-          positions.forEach(function(pp) { hasTies[pp] = (hasTies[pp]||0) + 1; });
+          positions.forEach(function(pp) { if (pp !== null) hasTies[pp] = (hasTies[pp]||0) + 1; });
 
           var hdrStyle = {fontSize:10, fontWeight:700, color:CL.muted, fontFamily:"system-ui", textTransform:"uppercase", letterSpacing:0.5, padding:"6px 0", textAlign:"center"};
           var cellStyle = {fontSize:14, fontWeight:700, fontFamily:"system-ui", textAlign:"center", padding:"10px 0"};
@@ -2160,8 +2168,8 @@ function LeaderboardTab(props) {
               </div>
               {/* Player rows */}
               {rows.map(function(row, idx) {
-                var isLeader = idx === 0;
-                var posLabel = (hasTies[positions[idx]] > 1 ? "T" : "") + positions[idx];
+                var isLeader = idx === 0 && row.roundsPlayed > 0;
+                var posLabel = positions[idx] !== null ? (hasTies[positions[idx]] > 1 ? "T" : "") + positions[idx] : "·";
                 return (
                   <div key={row.p.id} style={{display:"grid", gridTemplateColumns:colW.pos+" "+colW.name+" "+colW.tot+" repeat(5,"+colW.rnd+")", alignItems:"center", padding:"0 8px", borderBottom:"1px solid "+(isLeader ? "rgba(240,69,74,0.25)" : CL.border), background:isLeader ? "rgba(240,69,74,0.08)" : "transparent"}}>
                     <div style={Object.assign({}, cellStyle, {color:isLeader ? CL.red : CL.muted, fontSize:13})}>{posLabel}</div>
@@ -2169,7 +2177,7 @@ function LeaderboardTab(props) {
                       <div style={{fontSize:14, fontWeight:700, color:"#fff", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{row.p.emoji+" "+row.p.name.split(" ")[0]}</div>
                       <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>{"HI "+row.p.handicap}</div>
                     </div>
-                    <div style={Object.assign({}, cellStyle, {color:parClr(row.totalToPar), fontSize:16})}>{row.roundsPlayed > 0 ? toPar(row.totalToPar) : "—"}</div>
+                    <div style={Object.assign({}, cellStyle, {color:row.roundsPlayed > 0 ? parClr(row.totalToPar) : CL.muted, fontSize:16})}>{row.roundsPlayed > 0 ? toPar(row.totalToPar) : "—"}</div>
                     {row.rounds.map(function(diff, ci) {
                       return <div key={ci} style={Object.assign({}, cellStyle, {color:diff !== null ? parClr(diff) : CL.muted, fontSize:13})}>{diff !== null ? toPar(diff) : "·"}</div>;
                     })}
@@ -2186,7 +2194,7 @@ function LeaderboardTab(props) {
             </div>
           );
         })()
-      )}
+      }
 
       {view === "teams" && (
         <div>
