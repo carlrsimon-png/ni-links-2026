@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "2.2";
+const APP_VERSION = "2.3";
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
 const AUTH_KEY = "ni-links-auth";
 const GROUP_PIN = "2026";
@@ -2094,11 +2094,6 @@ function LeaderboardTab(props) {
     return t;
   }
 
-  var sortedPlayers = players
-    .map(function(p) { return Object.assign({}, p, { displayTotal: getPlayerTotal(p.id) }); })
-    .filter(function(p) { return p.displayTotal > 0; })
-    .sort(function(a, b) { return a.displayTotal - b.displayTotal; });
-
   var matchup = TEAM_MATCHUPS[0];
   var aIds = resolveTeam(matchup.teamA, players);
   var bIds = resolveTeam(matchup.teamB, players);
@@ -2120,33 +2115,95 @@ function LeaderboardTab(props) {
         {views.map(function(v) { return <button key={v.id} onClick={function() { setView(v.id); }} style={Object.assign({}, S.subTab, view===v.id ? S.subTabOn : S.subTabOff)}>{v.label}</button>; })}
       </div>
 
-      {view === "individual" && (
-        sortedPlayers.length === 0 ? <div style={S.card}><div style={{textAlign:"center", color:CL.muted, padding:24, fontSize:14, fontFamily:"system-ui"}}>No scores yet.</div></div> : (
+      {view === "individual" && (function() {
+        // Per-round score relative to par, computed hole-by-hole so partial rounds
+        // read correctly (sum of strokes-over-par on completed holes). Net mode
+        // subtracts strokes received per hole via the course stroke index.
+        function roundToPar(pid, ci) {
+          var pl = players.find(function(x) { return x.id === pid; });
+          var holes = scores[pid] && scores[pid][ci];
+          if (!pl || !holes) return { played: 0, toPar: 0 };
+          var course = COURSES[ci];
+          var ch = scoreMode === "net" ? getCourseHandicap(pl.handicap, ci) : 0;
+          var played = 0, tp = 0;
+          for (var hi = 0; hi < 18; hi++) {
+            var s = holes[hi];
+            if (s === null || s === undefined) continue;
+            played++;
+            var strokes = scoreMode === "net" ? strokesOnHole(ch, course.si[hi]) : 0;
+            tp += (s - strokes) - course.pars[hi];
+          }
+          return { played: played, toPar: tp };
+        }
+
+        function fmtToPar(v) { return v === 0 ? "E" : (v > 0 ? "+" + v : "" + v); }
+        function colorToPar(v) { return v < 0 ? CL.red : (v > 0 ? CL.blue : "#fff"); }
+
+        var rows = players.map(function(p) {
+          var rounds = COURSES.map(function(_, ci) { return roundToPar(p.id, ci); });
+          var totalPlayed = rounds.reduce(function(a, r) { return a + r.played; }, 0);
+          var totalToPar = rounds.reduce(function(a, r) { return a + (r.played > 0 ? r.toPar : 0); }, 0);
+          return { p: p, rounds: rounds, totalPlayed: totalPlayed, totalToPar: totalToPar };
+        }).filter(function(r) { return r.totalPlayed > 0; })
+          .sort(function(a, b) { return a.totalToPar - b.totalToPar; });
+
+        function posLabel(i) {
+          var val = rows[i].totalToPar;
+          var rank = rows.findIndex(function(r) { return r.totalToPar === val; }) + 1;
+          var tied = rows.filter(function(r) { return r.totalToPar === val; }).length > 1;
+          return (tied ? "T" : "") + rank;
+        }
+
+        var totalPar = COURSES.reduce(function(a, c) { return a + c.par; }, 0);
+        var W = { pos: 34, tot: 46, course: 42 };
+        var cellNum = { fontFamily:"ui-monospace, SFMono-Regular, Menlo, monospace", fontSize:14, fontWeight:700, textAlign:"center" };
+        var headCell = { fontFamily:"system-ui", fontSize:11, fontWeight:700, color:CL.muted, letterSpacing:0.5, textAlign:"center" };
+
+        if (rows.length === 0) {
+          return <div style={S.card}><div style={{textAlign:"center", color:CL.muted, padding:24, fontSize:14, fontFamily:"system-ui"}}>No scores yet.</div></div>;
+        }
+
+        return (
           <div style={S.card}>
-            {sortedPlayers.map(function(p, i) {
-              return (
-                <div key={p.id} style={Object.assign({display:"flex", alignItems:"center", padding:"12px 0", gap:12}, S.separator, i===0 ? {background:"rgba(220,38,38,0.08)", margin:"-4px -8px 0", padding:"14px 8px", borderRadius:6} : {})}>
-                  <div style={{fontSize:20, width:32, textAlign:"center"}}>{i===0?"🥇":i===1?"🥈":i===2?"🥉":i+1}</div>
-                  <div style={{flex:1}}>
-                    <div style={{fontSize:16, fontWeight:600, color:"#fff"}}>{p.emoji+" "+p.name}</div>
-                    <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui"}}>{"HI: "+p.handicap}</div>
-                    <div style={{display:"flex", gap:8, marginTop:2, flexWrap:"wrap"}}>
-                      {COURSES.map(function(_,ci) {
-                        var r = getPlayerRoundScore(p.id, ci);
-                        return r!==null ? <span key={ci} style={S.label}>{"R"+(ci+1)+": "+r}</span> : null;
+            <div style={{overflowX:"auto", margin:"-4px -4px 0"}}>
+              <div style={{minWidth: W.pos + 96 + W.tot + W.course * COURSES.length}}>
+                {/* Header */}
+                <div style={{display:"flex", alignItems:"center", padding:"6px 4px", borderBottom:"2px solid "+CL.border}}>
+                  <div style={Object.assign({}, headCell, {width:W.pos})}>POS</div>
+                  <div style={Object.assign({}, headCell, {flex:1, textAlign:"left", paddingLeft:4})}>PLAYER</div>
+                  <div style={Object.assign({}, headCell, {width:W.tot, color:CL.red})}>TOT</div>
+                  {COURSE_LABELS.map(function(lbl, ci) {
+                    return <div key={ci} style={Object.assign({}, headCell, {width:W.course})}>{lbl}</div>;
+                  })}
+                </div>
+                {/* Player rows */}
+                {rows.map(function(row, i) {
+                  return (
+                    <div key={row.p.id} style={Object.assign({display:"flex", alignItems:"center", padding:"9px 4px", borderBottom:"1px solid "+CL.border}, i===0 ? {background:"rgba(240,69,74,0.10)"} : {})}>
+                      <div style={Object.assign({}, cellNum, {width:W.pos, color:i===0?CL.red:CL.muted, fontSize:13})}>{posLabel(i)}</div>
+                      <div style={{flex:1, paddingLeft:4, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", fontSize:14, fontWeight:600, color:"#fff", fontFamily:"system-ui"}}>{row.p.emoji+" "+row.p.name}</div>
+                      <div style={Object.assign({}, cellNum, {width:W.tot, color:colorToPar(row.totalToPar)})}>{fmtToPar(row.totalToPar)}</div>
+                      {row.rounds.map(function(r, ci) {
+                        return <div key={ci} style={Object.assign({}, cellNum, {width:W.course, color: r.played>0 ? colorToPar(r.toPar) : CL.muted, fontWeight:600})}>{r.played>0 ? fmtToPar(r.toPar) : "–"}</div>;
                       })}
                     </div>
-                  </div>
-                  <div style={{textAlign:"right"}}>
-                    <div style={{fontSize:22, fontWeight:700, color:CL.red}}>{p.displayTotal}</div>
-                    <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>{scoreMode === "net" ? "net" : "gross"}</div>
-                  </div>
+                  );
+                })}
+                {/* PAR reference row */}
+                <div style={{display:"flex", alignItems:"center", padding:"8px 4px", borderTop:"2px solid "+CL.border}}>
+                  <div style={Object.assign({}, headCell, {width:W.pos})}></div>
+                  <div style={{flex:1, paddingLeft:4, fontSize:12, fontWeight:700, color:CL.muted, fontFamily:"system-ui", letterSpacing:0.5}}>PAR</div>
+                  <div style={Object.assign({}, cellNum, {width:W.tot, color:CL.muted, fontSize:13})}>{totalPar}</div>
+                  {COURSES.map(function(c, ci) {
+                    return <div key={ci} style={Object.assign({}, cellNum, {width:W.course, color:CL.muted, fontWeight:600, fontSize:13})}>{c.par}</div>;
+                  })}
                 </div>
-              );
-            })}
+              </div>
+            </div>
+            <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui", marginTop:8, textAlign:"center"}}>Scores shown to par · <span style={{color:CL.red}}>red</span> under · <span style={{color:CL.blue}}>blue</span> over · {scoreMode==="net"?"net of handicap":"gross"}</div>
           </div>
-        )
-      )}
+        );
+      })()}
 
       {view === "teams" && (
         <div>
