@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "3.2";
+const APP_VERSION = "3.4";
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
 const AUTH_KEY = "ni-links-auth";
 const GROUP_PIN = "2026";
@@ -196,7 +196,7 @@ function defaultState() {
     drinks: {},
     expenses: [],
     selectedTees: [0, 0, 0, 0, 0],
-    skinsEligible: { gross: [], net: [] },
+    skinsEligible: { gross: [], net: [], course: [[],[],[],[],[]] },
     courseOverrides: {},
     weatherCache: null,
   };
@@ -633,23 +633,40 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
     });
   }
 
-  // Skins — gross (trip-long) and net (settled per round), opt-in ($25/skin). A skin pays its
-  // winner $25 from every other eligible player. Because each skin is independent, the per-round
-  // net total equals the trip total when eligibility is constant, so settle-up math is the same.
-  if (scores && skinsEligible) {
-    [{ type: "gross", useNet: false }, { type: "net", useNet: true }].forEach(function(cfg) {
-      var skElig = skinsEligible[cfg.type] || [];
+  // Skins — five independent per-course games. Net scoring, $20/skin, opt-in per course.
+  // A skin pays its winner $20 from every other eligible player in that course's game.
+  if (scores && skinsEligible && skinsEligible.course) {
+    var SK_STAKE = 20;
+    COURSES.forEach(function(c, ri) {
+      var skElig = (skinsEligible.course[ri]) || [];
       if (skElig.length < 2) return;
-      var SK_STAKE = 25;
-      var skTotals = getTotalSkins(scores, players, skElig, cfg.useNet);
+      var rd = computeSkins(scores, players, skElig, ri, true); // net
+      var skTotals = rd.totals || {};
       var skGrand = 0;
       skElig.forEach(function(pid) { skGrand += (skTotals[pid] || 0); });
-      if (skGrand === 0) return; // no skins won yet
+      if (skGrand === 0) return; // no skins decided on this course yet
       skElig.forEach(function(pid) {
         var won = skTotals[pid] || 0;
         var winnings = won * SK_STAKE * (skElig.length - 1);
         var cost = (skGrand - won) * SK_STAKE;
         balances[pid] = (balances[pid] || 0) + (winnings - cost);
+      });
+    });
+  }
+
+  // Overall trip-total skins — gross and net, one combined pot each ($20/skin), opt-in.
+  // Independent of the per-course games above; a player can be in either, both, or neither.
+  if (scores && skinsEligible) {
+    [{ type: "gross", useNet: false }, { type: "net", useNet: true }].forEach(function(cfg) {
+      var elig = skinsEligible[cfg.type] || [];
+      if (elig.length < 2) return;
+      var totals = getTotalSkins(scores, players, elig, cfg.useNet);
+      var grand = 0;
+      elig.forEach(function(pid) { grand += (totals[pid] || 0); });
+      if (grand === 0) return;
+      elig.forEach(function(pid) {
+        var won = totals[pid] || 0;
+        balances[pid] = (balances[pid] || 0) + (won * 20 * (elig.length - 1) - (grand - won) * 20);
       });
     });
   }
@@ -943,6 +960,12 @@ export default function App() {
         });
         // Apply any gatekeeper course-setup overrides (par/SI) onto live COURSES.
         applyCourseOverrides(merged.courseOverrides);
+        // Migrate skins eligibility to the per-course shape ({ course: [ [], x5 ] }).
+        if (!merged.skinsEligible || typeof merged.skinsEligible !== "object") merged.skinsEligible = {};
+        if (!Array.isArray(merged.skinsEligible.gross)) merged.skinsEligible.gross = [];
+        if (!Array.isArray(merged.skinsEligible.net)) merged.skinsEligible.net = [];
+        if (!Array.isArray(merged.skinsEligible.course)) merged.skinsEligible.course = [];
+        while (merged.skinsEligible.course.length < COURSES.length) merged.skinsEligible.course.push([]);
         merged.players.forEach(function(p) {
           if (!merged.scores[p.id]) {
             merged.scores[p.id] = {};
@@ -1243,7 +1266,7 @@ export default function App() {
             <div style={{fontSize:14, color:CL.muted, fontFamily:"system-ui", marginBottom:20}}>Sign in with the group passcode to view bets and games.</div>
             <button onClick={handleLogout} style={Object.assign({}, S.primaryBtn, {width:"auto", padding:"12px 32px"})}>Sign In</button>
           </div>
-        ) : <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} isGuest={booksReadOnly} canEdit={canEditBooks} skinsEligible={state.skinsEligible || {gross:[], net:[]}} />)}
+        ) : <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} isGuest={booksReadOnly} canEdit={canEditBooks} skinsEligible={state.skinsEligible || {gross:[], net:[], course:[[],[],[],[],[]]}} />)}
         {activeTab === "expenses" && (isGuest ? (
           <div style={{padding:"60px 24px", textAlign:"center"}}>
             <div style={{fontSize:48, marginBottom:16}}>🔒</div>
@@ -2585,7 +2608,7 @@ function BetsTab(props) {
   var players = props.players, games = props.games, bets = props.bets;
   var scores = props.scores || {};
   var customBets = props.customBets, h2hBets = props.h2hBets || [], drinks = props.drinks || {};
-  var skinsEligible = props.skinsEligible || { gross: [], net: [] };
+  var skinsEligible = props.skinsEligible || { gross: [], net: [], course: [[],[],[],[],[]] };
   var teamMatches = props.teamMatches || DEFAULT_TEAM_MATCHES;
   var individualProps = props.individualProps || DEFAULT_INDIVIDUAL_PROPS;
   var expenses = props.expenses || [];
@@ -2865,102 +2888,137 @@ function BetsTab(props) {
         <div>
           {/* Skins opt-in and results */}
           {(function() {
-            function toggleSkin(type, pid) {
+            // Per-course skins: five independent bets, one per course. Net scoring, $20/skin,
+            // each with its own opt-in. Sole low net score on a hole wins; ties push (carry).
+            var SK_STAKE = 20;
+            function toggleSkinCourse(ri, pid) {
               var se = Object.assign({}, skinsEligible);
-              var list = (se[type] || []).slice();
+              var arr = (se.course || []).slice();
+              while (arr.length < COURSES.length) arr.push([]);
+              var list = (arr[ri] || []).slice();
               var idx = list.indexOf(pid);
               if (idx >= 0) list.splice(idx, 1); else list.push(pid);
-              se[type] = list;
-              update({skinsEligible:se});
+              arr[ri] = list;
+              se.course = arr;
+              update({ skinsEligible: se });
             }
-            function renderSkinsSection(type, label, emoji, perRound) {
-              var eligible = skinsEligible[type] || [];
-              var useNet = type === "net";
-              // Trip totals
-              var tripTotals = eligible.length >= 2 ? getTotalSkins(scores, players, eligible, useNet) : {};
-              var totalSkins = 0;
-              eligible.forEach(function(id) { totalSkins += (tripTotals[id] || 0); });
-              var sortedPlayers = eligible.map(function(pid) {
+            function renderCourseSkins(ri) {
+              var course = COURSES[ri];
+              var eligible = ((skinsEligible.course || [])[ri]) || [];
+              var rd = eligible.length >= 2 ? computeSkins(scores, players, eligible, ri, true) : null;
+              var roundSkins = {};
+              if (rd) eligible.forEach(function(id) { roundSkins[id] = rd.totals[id] || 0; });
+              var roundTotal = rd ? eligible.reduce(function(s, id) { return s + (roundSkins[id] || 0); }, 0) : 0;
+              var played = eligible.some(function(pid) {
+                return scores[pid] && scores[pid][ri] && scores[pid][ri].some(function(s) { return s != null; });
+              });
+              var standings = eligible.map(function(pid) {
                 var p = players.find(function(x) { return x.id === pid; });
-                return { p:p, skins: tripTotals[pid] || 0 };
+                return { p: p, skins: roundSkins[pid] || 0 };
               }).sort(function(a, b) { return b.skins - a.skins; });
-              var topSkins = sortedPlayers.length ? sortedPlayers[0].skins : 0;
-
+              var topSkins = standings.length ? standings[0].skins : 0;
+              var pushedAtEnd = rd && rd.carry > 1 ? rd.carry - 1 : 0;
               return (
-                <div style={S.card}>
-                  <div style={S.cardTitle}>{emoji+" "+label}</div>
-                  <div style={Object.assign({}, S.label, {marginBottom:4})}>{useNet ? "Net scores (after handicap strokes) determine skins." : "Raw gross scores determine skins."} Sole low score on a hole wins. Ties push.</div>
-                  <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginBottom:10, fontWeight:600}}>{"$25/skin · "+(perRound?"settled each round · ":"")+eligible.length+" player"+(eligible.length!==1?"s":"")+" in"}</div>
+                <div style={S.card} key={ri}>
+                  <div style={S.cardTitle}>{"\uD83D\uDD2A " + course.name}</div>
+                  <div style={Object.assign({}, S.label, {marginBottom:4})}>{"Net skins \u00B7 Par " + course.par + ". Sole low net score wins the hole; ties push."}</div>
+                  <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginBottom:10, fontWeight:600}}>{"$20/skin \u00B7 " + eligible.length + " player" + (eligible.length !== 1 ? "s" : "") + " in"}</div>
 
-                  {/* Opt-in toggles */}
                   <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginBottom:4}}>Who's in:</div>
                   <div style={{display:"flex", gap:4, flexWrap:"wrap", marginBottom:12}}>
                     {players.map(function(p) {
                       var isIn = eligible.indexOf(p.id) >= 0;
-                      return <button key={p.id} onClick={function() { toggleSkin(type, p.id); }} style={Object.assign({}, S.pillBtn, isIn ? {background:"rgba(34,197,94,0.2)", borderColor:"#22c55e", color:"#22c55e"} : {opacity:0.6})}>{(isIn?"✓ ":"")+p.emoji+" "+p.name.split(" ")[0]}</button>;
+                      return <button key={p.id} onClick={function() { toggleSkinCourse(ri, p.id); }} style={Object.assign({}, S.pillBtn, isIn ? {background:"rgba(34,197,94,0.2)", borderColor:"#22c55e", color:"#22c55e"} : {opacity:0.6})}>{(isIn ? "\u2713 " : "") + p.emoji + " " + p.name.split(" ")[0]}</button>;
                     })}
                   </div>
 
                   {eligible.length < 2 ? (
                     <div style={{textAlign:"center", padding:16, color:CL.muted, fontFamily:"system-ui", fontSize:13}}>Select at least 2 players to start.</div>
+                  ) : !played ? (
+                    <div style={{textAlign:"center", padding:16, color:CL.muted, fontFamily:"system-ui", fontSize:13}}>Not played yet.</div>
+                  ) : roundTotal === 0 ? (
+                    <div style={{textAlign:"center", padding:16, color:CL.muted, fontFamily:"system-ui", fontSize:13}}>{"No skins won yet" + (pushedAtEnd ? " \u00B7 " + pushedAtEnd + " pushed" : "") + "."}</div>
                   ) : (
                     <div>
-                      {/* Trip totals leaderboard */}
-                      <div style={{fontSize:13, fontWeight:700, color:"#fff", fontFamily:"system-ui", marginBottom:6}}>{perRound ? "Running Total · settles each round" : "Trip Total"}</div>
-                      {sortedPlayers.map(function(x, i) {
+                      {standings.map(function(x, i) {
                         var isLeader = x.skins > 0 && x.skins === topSkins;
-                        var winnings = x.skins * 25 * (eligible.length - 1);
-                        var cost = (totalSkins - x.skins) * 25;
-                        var net = winnings - cost;
+                        var net = x.skins * SK_STAKE * (eligible.length - 1) - (roundTotal - x.skins) * SK_STAKE;
                         return (
-                          <div key={x.p.id} style={Object.assign({display:"flex", alignItems:"center", padding:"7px 0", gap:10}, i<sortedPlayers.length-1?S.separator:{}, isLeader?{background:"rgba(34,197,94,0.08)", margin:"0 -8px", padding:"7px 8px", borderRadius:6}:{})}>
+                          <div key={x.p.id} style={Object.assign({display:"flex", alignItems:"center", padding:"7px 0", gap:10}, i < standings.length - 1 ? S.separator : {}, isLeader ? {background:"rgba(34,197,94,0.08)", margin:"0 -8px", padding:"7px 8px", borderRadius:6} : {})}>
                             <div style={{fontSize:15}}>{x.p.emoji}</div>
                             <div style={{flex:1, fontSize:14, color:"#fff", fontFamily:"system-ui"}}>{x.p.name.split(" ")[0]}</div>
-                            <div style={{fontSize:14, fontWeight:700, color:isLeader?"#22c55e":"#fff", fontFamily:"system-ui", width:50, textAlign:"center"}}>{x.skins+" 🏆"}</div>
-                            <div style={{fontSize:12, fontWeight:600, color:net>0?"#22c55e":net<0?"#ef4444":CL.muted, fontFamily:"system-ui", width:55, textAlign:"right"}}>{net>0?"+$"+net:net<0?"-$"+Math.abs(net):"Even"}</div>
+                            <div style={{fontSize:14, fontWeight:700, color:isLeader ? "#22c55e" : "#fff", fontFamily:"system-ui", width:50, textAlign:"center"}}>{x.skins + " \uD83C\uDFC6"}</div>
+                            <div style={{fontSize:12, fontWeight:600, color:net > 0 ? "#22c55e" : net < 0 ? "#ef4444" : CL.muted, fontFamily:"system-ui", width:55, textAlign:"right"}}>{net > 0 ? "+$" + net : net < 0 ? "-$" + Math.abs(net) : "Even"}</div>
                           </div>
                         );
                       })}
-
-                      {/* Per-round breakdown */}
-                      <div style={{fontSize:13, fontWeight:700, color:"#fff", fontFamily:"system-ui", marginTop:16, marginBottom:6}}>By Round</div>
+                      {pushedAtEnd > 0 && (
+                        <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginTop:8}}>{pushedAtEnd + " skin" + (pushedAtEnd !== 1 ? "s" : "") + " pushed on the final hole (no sole winner)."}</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            }
+            function toggleSkinType(type, pid) {
+              var se = Object.assign({}, skinsEligible);
+              var list = (se[type] || []).slice();
+              var idx = list.indexOf(pid);
+              if (idx >= 0) list.splice(idx, 1); else list.push(pid);
+              se[type] = list;
+              update({ skinsEligible: se });
+            }
+            function renderTotalSkins(type, label, emoji) {
+              var useNet = type === "net";
+              var eligible = skinsEligible[type] || [];
+              var totals = eligible.length >= 2 ? getTotalSkins(scores, players, eligible, useNet) : {};
+              var grand = 0; eligible.forEach(function(id) { grand += (totals[id] || 0); });
+              var standings = eligible.map(function(pid) {
+                var p = players.find(function(x) { return x.id === pid; });
+                return { p: p, skins: totals[pid] || 0 };
+              }).sort(function(a, b) { return b.skins - a.skins; });
+              var top = standings.length ? standings[0].skins : 0;
+              return (
+                <div style={S.card}>
+                  <div style={S.cardTitle}>{emoji + " " + label}</div>
+                  <div style={Object.assign({}, S.label, {marginBottom:4})}>{(useNet ? "Net" : "Gross") + " skins across all 5 rounds \u2014 one combined pot. Sole low score on a hole wins; ties push."}</div>
+                  <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginBottom:10, fontWeight:600}}>{"$20/skin \u00B7 whole trip \u00B7 " + eligible.length + " player" + (eligible.length !== 1 ? "s" : "") + " in"}</div>
+                  <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginBottom:4}}>Who's in:</div>
+                  <div style={{display:"flex", gap:4, flexWrap:"wrap", marginBottom:12}}>
+                    {players.map(function(p) {
+                      var isIn = eligible.indexOf(p.id) >= 0;
+                      return <button key={p.id} onClick={function() { toggleSkinType(type, p.id); }} style={Object.assign({}, S.pillBtn, isIn ? {background:"rgba(34,197,94,0.2)", borderColor:"#22c55e", color:"#22c55e"} : {opacity:0.6})}>{(isIn ? "\u2713 " : "") + p.emoji + " " + p.name.split(" ")[0]}</button>;
+                    })}
+                  </div>
+                  {eligible.length < 2 ? (
+                    <div style={{textAlign:"center", padding:16, color:CL.muted, fontFamily:"system-ui", fontSize:13}}>Select at least 2 players to start.</div>
+                  ) : grand === 0 ? (
+                    <div style={{textAlign:"center", padding:16, color:CL.muted, fontFamily:"system-ui", fontSize:13}}>No skins won yet.</div>
+                  ) : (
+                    <div>
+                      {standings.map(function(x, i) {
+                        var isLeader = x.skins > 0 && x.skins === top;
+                        var net = x.skins * 20 * (eligible.length - 1) - (grand - x.skins) * 20;
+                        return (
+                          <div key={x.p.id} style={Object.assign({display:"flex", alignItems:"center", padding:"7px 0", gap:10}, i < standings.length - 1 ? S.separator : {}, isLeader ? {background:"rgba(34,197,94,0.08)", margin:"0 -8px", padding:"7px 8px", borderRadius:6} : {})}>
+                            <div style={{fontSize:15}}>{x.p.emoji}</div>
+                            <div style={{flex:1, fontSize:14, color:"#fff", fontFamily:"system-ui"}}>{x.p.name.split(" ")[0]}</div>
+                            <div style={{fontSize:14, fontWeight:700, color:isLeader ? "#22c55e" : "#fff", fontFamily:"system-ui", width:50, textAlign:"center"}}>{x.skins + " \uD83C\uDFC6"}</div>
+                            <div style={{fontSize:12, fontWeight:600, color:net > 0 ? "#22c55e" : net < 0 ? "#ef4444" : CL.muted, fontFamily:"system-ui", width:55, textAlign:"right"}}>{net > 0 ? "+$" + net : net < 0 ? "-$" + Math.abs(net) : "Even"}</div>
+                          </div>
+                        );
+                      })}
+                      <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginTop:10, marginBottom:2, fontWeight:600}}>By course</div>
                       {COURSES.map(function(c, ri) {
                         var rd = computeSkins(scores, players, eligible, ri, useNet);
-                        var anyScores = rd.results.some(function(r) { return r.winner !== null; });
-                        var hasData = rd.results.some(function(r) { return !r.pushed || r.value > 1; });
-                        // Count skins won per player this round
-                        var roundSkins = {};
-                        eligible.forEach(function(id) { roundSkins[id] = rd.totals[id] || 0; });
-                        var roundTotal = Object.values(roundSkins).reduce(function(a,b){return a+b;},0);
+                        var winners = eligible.filter(function(id) { return rd.totals[id]; }).map(function(id) {
+                          var p = players.find(function(x) { return x.id === id; });
+                          return p.name.split(" ")[0] + " " + rd.totals[id];
+                        });
                         return (
-                          <div key={ri} style={{marginBottom:8}}>
-                            <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", padding:"6px 0"}}>
-                              <div style={{fontSize:13, color:"#fff", fontFamily:"system-ui", fontWeight:600}}>{COURSE_LABELS[ri]}</div>
-                              <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui"}}>{roundTotal > 0 ? roundTotal+" skin"+(roundTotal!==1?"s":"")+" won" : anyScores ? "No skins yet" : "Not played"}{rd.carry > 0 ? " · "+rd.carry+" pushed" : ""}</div>
-                            </div>
-                            {roundTotal > 0 && (perRound ? (
-                              <div style={{marginBottom:6}}>
-                                {eligible.map(function(pid) {
-                                  var p = players.find(function(x){return x.id===pid;});
-                                  var won = roundSkins[pid] || 0;
-                                  var rnet = won * 25 * (eligible.length - 1) - (roundTotal - won) * 25;
-                                  return (
-                                    <div key={pid} style={{display:"flex", alignItems:"center", gap:8, padding:"2px 0"}}>
-                                      <span style={{fontSize:12, color:"#fff", fontFamily:"system-ui", flex:1}}>{p.emoji+" "+p.name.split(" ")[0]+(won?"  "+won+" 🏆":"")}</span>
-                                      <span style={{fontSize:12, fontWeight:600, color:rnet>0?"#22c55e":rnet<0?"#ef4444":CL.muted, fontFamily:"system-ui"}}>{rnet>0?"+$"+rnet:rnet<0?"-$"+Math.abs(rnet):"Even"}</span>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            ) : (
-                              <div style={{display:"flex", gap:8, flexWrap:"wrap", marginBottom:4}}>
-                                {eligible.map(function(pid) {
-                                  if (!roundSkins[pid]) return null;
-                                  var p = players.find(function(x){return x.id===pid;});
-                                  return <span key={pid} style={{fontSize:12, color:"#22c55e", fontFamily:"system-ui"}}>{p.emoji+" "+p.name.split(" ")[0]+": "+roundSkins[pid]}</span>;
-                                })}
-                              </div>
-                            ))}
+                          <div key={ri} style={{display:"flex", justifyContent:"space-between", alignItems:"center", padding:"3px 0"}}>
+                            <span style={{fontSize:12, color:"#fff", fontFamily:"system-ui"}}>{COURSE_LABELS[ri]}</span>
+                            <span style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", textAlign:"right"}}>{winners.length ? winners.join("  \u00B7  ") : "\u2014"}</span>
                           </div>
                         );
                       })}
@@ -2971,8 +3029,12 @@ function BetsTab(props) {
             }
             return (
               <div>
-                {renderSkinsSection("gross", "Gross Skins", "⛳", false)}
-                {renderSkinsSection("net", "Net Skins", "🎯", true)}
+                <div style={{fontSize:12, fontWeight:700, color:"#fff", fontFamily:"system-ui", padding:"0 4px 6px"}}>Overall \u00B7 whole trip</div>
+                {renderTotalSkins("gross", "Total Gross Skins", "\u26F3")}
+                {renderTotalSkins("net", "Total Net Skins", "\uD83C\uDFAF")}
+                <div style={{fontSize:12, fontWeight:700, color:"#fff", fontFamily:"system-ui", padding:"14px 4px 6px"}}>Per course \u00B7 five separate games</div>
+                <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", padding:"0 4px 8px"}}>One net skins game per course, $20/skin. Opt in per course; each settles on its own.</div>
+                {COURSES.map(function(c, ri) { return renderCourseSkins(ri); })}
               </div>
             );
           })()}
