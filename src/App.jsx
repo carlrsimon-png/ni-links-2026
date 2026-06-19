@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "2.9";
+const APP_VERSION = "3.1";
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
 const AUTH_KEY = "ni-links-auth";
 const GROUP_PIN = "2026";
@@ -197,6 +197,7 @@ function defaultState() {
     expenses: [],
     selectedTees: [0, 0, 0, 0, 0],
     skinsEligible: { gross: [], net: [] },
+    courseOverrides: {},
     weatherCache: null,
   };
 }
@@ -238,6 +239,29 @@ function getGrossBrackets(players) {
 
 // Active slopes — updated from state when tees are selected. Defaults to first tee option per course.
 var ACTIVE_SLOPES = COURSES.map(function(c) { return c.tees[0].slope; });
+
+// Snapshot of the built-in (default) par/SI for every course, so gatekeeper overrides
+// can be applied on top and cleanly reset. The live COURSES objects are mutated in place
+// (same pattern as ACTIVE_SLOPES) so every scoring function picks up overrides automatically.
+var DEFAULT_COURSE_DATA = COURSES.map(function(c) {
+  return { pars: c.pars.slice(), si: c.si.slice() };
+});
+
+// Apply per-course par/SI overrides onto the live COURSES objects. Idempotent: always
+// rebuilds from defaults + override, so it's safe to call on every render.
+// overrides shape: { [courseIdx]: { pars:[18 ints], si:[18 ints] } }
+function applyCourseOverrides(overrides) {
+  overrides = overrides || {};
+  COURSES.forEach(function(c, i) {
+    var d = DEFAULT_COURSE_DATA[i];
+    var o = overrides[i];
+    var pars = (o && o.pars && o.pars.length === 18) ? o.pars.slice() : d.pars.slice();
+    var si = (o && o.si && o.si.length === 18) ? o.si.slice() : d.si.slice();
+    c.pars = pars;
+    c.si = si;
+    c.par = pars.reduce(function(a, b) { return a + (b || 0); }, 0);
+  });
+}
 
 // Calculate course handicap from handicap index
 // Formula: HI × (Slope/113) rounded to nearest integer
@@ -917,6 +941,8 @@ export default function App() {
           var ti = st[i] || 0;
           if (ti >= 0 && ti < c.tees.length) ACTIVE_SLOPES[i] = c.tees[ti].slope;
         });
+        // Apply any gatekeeper course-setup overrides (par/SI) onto live COURSES.
+        applyCourseOverrides(merged.courseOverrides);
         merged.players.forEach(function(p) {
           if (!merged.scores[p.id]) {
             merged.scores[p.id] = {};
@@ -940,6 +966,7 @@ export default function App() {
           expenses: fresh.expenses,
           selectedTees: fresh.selectedTees,
           skinsEligible: fresh.skinsEligible,
+          courseOverrides: fresh.courseOverrides,
         });
         setState(function(prev) { return Object.assign({}, prev, { initialized:true }); });
       }
@@ -1016,7 +1043,7 @@ export default function App() {
     // sanitized to eligibility-only inside setState below, so creating/deleting/settling
     // props stays gatekeeper-only. Guests still can't write anything.
     if (!canEditBooksRef.current && !isGuestWrite) {
-      var bookFields = ["games", "bets", "teamMatches", "drinks", "expenses", "customBets"];
+      var bookFields = ["games", "bets", "teamMatches", "drinks", "expenses", "customBets", "courseOverrides"];
       var stripped = false;
       bookFields.forEach(function(f) {
         if (Object.prototype.hasOwnProperty.call(changes, f)) { delete changes[f]; stripped = true; }
@@ -1024,7 +1051,7 @@ export default function App() {
       if (stripped && Object.keys(changes).length === 0) return; // nothing left to apply
     } else if (!canEditBooksRef.current) {
       // Guests: strip everything including h2hBets
-      var bookFields2 = ["games", "bets", "individualProps", "h2hBets", "teamMatches", "drinks", "expenses", "customBets", "skinsEligible"];
+      var bookFields2 = ["games", "bets", "individualProps", "h2hBets", "teamMatches", "drinks", "expenses", "customBets", "skinsEligible", "courseOverrides"];
       var stripped2 = false;
       bookFields2.forEach(function(f) {
         if (Object.prototype.hasOwnProperty.call(changes, f)) { delete changes[f]; stripped2 = true; }
@@ -1051,7 +1078,7 @@ export default function App() {
       }
       var next = Object.assign({}, prev, applied);
       // Save to Firebase (debounced to avoid hammering Firestore) — never for guests
-      if (!isGuestWrite && (changes.scores || changes.players || changes.games || changes.bets || changes.individualProps || changes.h2hBets || changes.teamMatches || changes.drinks || changes.expenses || changes.selectedTees || changes.skinsEligible)) {
+      if (!isGuestWrite && (changes.scores || changes.players || changes.games || changes.bets || changes.individualProps || changes.h2hBets || changes.teamMatches || changes.drinks || changes.expenses || changes.selectedTees || changes.skinsEligible || changes.courseOverrides)) {
         clearTimeout(saveTimer.current);
         setSaveStatus("saving");
         saveTimer.current = setTimeout(function() {
@@ -1067,6 +1094,7 @@ export default function App() {
             expenses: next.expenses,
             selectedTees: next.selectedTees,
             skinsEligible: next.skinsEligible,
+            courseOverrides: next.courseOverrides,
           }).then(function() {
             setSaveStatus("saved");
             setTimeout(function() { setSaveStatus("idle"); }, 1500);
@@ -1095,6 +1123,7 @@ export default function App() {
       expenses: fresh.expenses,
       selectedTees: fresh.selectedTees,
       skinsEligible: fresh.skinsEligible,
+      courseOverrides: fresh.courseOverrides,
     });
   };
 
@@ -1103,24 +1132,10 @@ export default function App() {
   var p = state, players = p.players, scores = p.scores, games = p.games, bets = p.bets;
   var customBets = p.customBets, drinks = p.drinks, activeTab = p.activeTab;
   var selectedRound = p.selectedRound, addingGame = p.addingGame;
-  var lb = useMemo(function() { return getLeaderboard(players, scores); }, [players, scores]);
+  // Keep live COURSES (par/SI) in sync with any gatekeeper overrides before scoring runs.
+  applyCourseOverrides(state.courseOverrides);
+  var lb = useMemo(function() { return getLeaderboard(players, scores); }, [players, scores, state.courseOverrides]);
   var rs = useCallback(function(pid, ri) { return getRoundScore(scores, pid, ri); }, [scores]);
-
-  if (loading || !auth.loaded) return (
-    <div style={S.loading}>
-      <img src="/logo.png" alt="Northern Irish Links 2026" onError={function(e){e.target.style.display="none";}} style={{width:120, height:120}} />
-      <div style={{color:CL.muted, fontFamily:"system-ui", marginTop:12}}>Loading...</div>
-    </div>
-  );
-
-  if (!auth.authed) return (<PinScreen onSuccess={handlePinSuccess} onGuest={handleGuest} />);
-  if (!auth.playerId && !auth.guest) return (<PlayerSelectScreen players={state.players} onSelect={handlePlayerSelect} />);
-
-  var isGuest = auth.guest === true;
-  var currentPlayer = isGuest ? null : state.players.find(function(p) { return p.id === auth.playerId; });
-  // Only the bookkeepers (Brian, Carl) may edit Bets & Expenses. Everyone else views them read-only.
-  var canEditBooks = !isGuest && BOOKKEEPER_IDS.indexOf(auth.playerId) >= 0;
-  var booksReadOnly = !canEditBooks;
 
   // ── Pull-to-refresh ──────────────────────────────────────────────────
   var pullRef = useRef({ startY: 0, pulling: false, dist: 0 });
@@ -1169,6 +1184,22 @@ export default function App() {
     };
   });
 
+  if (loading || !auth.loaded) return (
+    <div style={S.loading}>
+      <img src="/logo.png" alt="Northern Irish Links 2026" onError={function(e){e.target.style.display="none";}} style={{width:120, height:120}} />
+      <div style={{color:CL.muted, fontFamily:"system-ui", marginTop:12}}>Loading...</div>
+    </div>
+  );
+
+  if (!auth.authed) return (<PinScreen onSuccess={handlePinSuccess} onGuest={handleGuest} />);
+  if (!auth.playerId && !auth.guest) return (<PlayerSelectScreen players={state.players} onSelect={handlePlayerSelect} />);
+
+  var isGuest = auth.guest === true;
+  var currentPlayer = isGuest ? null : state.players.find(function(p) { return p.id === auth.playerId; });
+  // Only the bookkeepers (Brian, Carl) may edit Bets & Expenses. Everyone else views them read-only.
+  var canEditBooks = !isGuest && BOOKKEEPER_IDS.indexOf(auth.playerId) >= 0;
+  var booksReadOnly = !canEditBooks;
+
   var TABS = [
     { id:"home", icon:"🏠", label:"Home" },
     { id:"itinerary", icon:"📋", label:"Trip" },
@@ -1203,7 +1234,7 @@ export default function App() {
         )}
         {activeTab === "home" && <HomeTab players={players} lb={lb} currentPlayer={currentPlayer} weatherCache={state.weatherCache} update={update} isGuest={isGuest} />}
         {activeTab === "itinerary" && <ItineraryTab weatherCache={state.weatherCache} update={update} isGuest={isGuest} />}
-        {activeTab === "scores" && <ScoresTab players={players} scores={scores} sel={selectedRound} hole={scoringHole} setHole={setScoringHole} update={update} rs={rs} currentPlayer={currentPlayer} isGuest={isGuest} canEditBooks={canEditBooks} selectedTees={state.selectedTees || [0,0,0,0,0]} />}
+        {activeTab === "scores" && <ScoresTab players={players} scores={scores} sel={selectedRound} hole={scoringHole} setHole={setScoringHole} update={update} rs={rs} currentPlayer={currentPlayer} isGuest={isGuest} canEditBooks={canEditBooks} selectedTees={state.selectedTees || [0,0,0,0,0]} courseOverrides={state.courseOverrides || {}} />}
         {activeTab === "leaderboard" && <LeaderboardTab players={players} scores={scores} lb={lb} rs={rs} currentPlayer={currentPlayer} />}
         {activeTab === "bets" && (isGuest ? (
           <div style={{padding:"60px 24px", textAlign:"center"}}>
@@ -1853,6 +1884,27 @@ function ScoresTab(props) {
   var hceOpen = useState(false); var hcEditorOpen = hceOpen[0], setHcEditorOpen = hceOpen[1];
   var hceId = useState(null); var hcEditId = hceId[0], setHcEditId = hceId[1];
   var hceVal = useState(""); var hcVal = hceVal[0], setHcVal = hceVal[1];
+  // Course-setup editor (gatekeepers only) — fix par/SI live if the pro shop's card differs.
+  var ceo = useState(false); var courseEditorOpen = ceo[0], setCourseEditorOpen = ceo[1];
+  var courseOverrides = props.courseOverrides || {};
+  var courseIsOverridden = !!courseOverrides[sel];
+
+  // Write the current course's full par + SI arrays into courseOverrides, with one cell changed.
+  function setCourseHole(field, holeIdx, value) {
+    if (props.isGuest || !props.canEditBooks) return;
+    var pars = course.pars.slice();
+    var si = course.si.slice();
+    if (field === "par") pars[holeIdx] = value; else si[holeIdx] = value;
+    var ov = Object.assign({}, courseOverrides);
+    ov[sel] = { pars: pars, si: si };
+    update({ courseOverrides: ov });
+  }
+  function resetCourseSetup() {
+    if (props.isGuest || !props.canEditBooks) return;
+    var ov = Object.assign({}, courseOverrides);
+    delete ov[sel];
+    update({ courseOverrides: ov });
+  }
 
   function saveHandicap() {
     if (props.isGuest || !hcEditId) return;
@@ -2038,6 +2090,40 @@ function ScoresTab(props) {
           }} style={Object.assign({}, S.pillBtn, {fontSize:11, padding:"4px 10px"}, active ? {background:"rgba(34,197,94,0.2)", borderColor:"#22c55e", color:"#22c55e"} : {})}>{tee.label+" ("+tee.slope+")"}</button>;
         })}
       </div>
+
+      {/* Course-setup override (gatekeepers only) — fix par/SI live to match the day's card */}
+      {props.canEditBooks && (
+        <div style={{padding:"0 16px", marginBottom:8}}>
+          <button onClick={function() { setCourseEditorOpen(!courseEditorOpen); }} style={{width:"100%", background:"none", border:"1px dashed "+CL.border, borderRadius:6, color:CL.muted, fontSize:11, fontFamily:"system-ui", padding:"6px 10px", cursor:"pointer", textAlign:"left"}}>
+            {(courseEditorOpen?"▾":"▸")+" ⚙︎ Edit course setup (par / SI)"}{courseIsOverridden ? <span style={{color:"#22c55e"}}>{"  · edited"}</span> : null}
+          </button>
+          {courseEditorOpen && (function() {
+            var siValid = (function() { var s = course.si.slice().sort(function(a,b){return a-b;}); for (var i=0;i<18;i++){ if (s[i]!==i+1) return false; } return true; })();
+            function holeCell(h) {
+              return (
+                <div key={h} style={{textAlign:"center", background:"rgba(30,58,95,0.15)", borderRadius:3, padding:"4px 0"}}>
+                  <div style={{fontSize:10, color:"#fff", fontFamily:"system-ui", fontWeight:700, marginBottom:2}}>{h+1}</div>
+                  <button onClick={function() { setCourseHole("par", h, course.pars[h] >= 5 ? 3 : course.pars[h] + 1); }} style={{display:"block", width:"86%", margin:"0 auto 3px", background:"rgba(220,38,38,0.15)", border:"1px solid rgba(220,38,38,0.4)", borderRadius:3, color:CL.red, fontSize:11, fontWeight:700, fontFamily:"system-ui", padding:"2px 0", cursor:"pointer"}}>{course.pars[h]}</button>
+                  <input type="number" inputMode="numeric" min={1} max={18} value={course.si[h]} onChange={function(e) { var v = parseInt(e.target.value, 10); if (!isNaN(v) && v >= 1 && v <= 18) setCourseHole("si", h, v); }} style={{width:"86%", textAlign:"center", background:CL.bg, border:"1px solid "+CL.border, borderRadius:3, color:"#fff", fontSize:11, fontFamily:"system-ui", padding:"2px 0"}} />
+                </div>
+              );
+            }
+            return (
+              <div style={Object.assign({}, S.card, {marginTop:6})}>
+                <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", marginBottom:8}}>Tap a hole's <span style={{color:CL.red}}>par</span> to cycle 3→4→5. Type its <span style={{color:"#fff"}}>SI</span> (1–18). Saved live for everyone.</div>
+                <div style={{fontSize:9, color:CL.muted, fontFamily:"system-ui", fontWeight:600, marginBottom:3}}>FRONT 9 · (par / SI)</div>
+                <div style={{display:"grid", gridTemplateColumns:"repeat(9,1fr)", gap:2}}>{Array.from({length:9}, function(_,i){ return holeCell(i); })}</div>
+                <div style={{fontSize:9, color:CL.muted, fontFamily:"system-ui", fontWeight:600, margin:"8px 0 3px"}}>BACK 9 · (par / SI)</div>
+                <div style={{display:"grid", gridTemplateColumns:"repeat(9,1fr)", gap:2}}>{Array.from({length:9}, function(_,i){ return holeCell(i+9); })}</div>
+                <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:10}}>
+                  <div style={{fontSize:12, color:"#fff", fontFamily:"system-ui", fontWeight:600}}>{"Par "+course.par}{!siValid && <span style={{color:CL.red, fontWeight:400}}>{"  ·  SI should use 1–18 once each"}</span>}</div>
+                  {courseIsOverridden && <button onClick={resetCourseSetup} style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:6, padding:"5px 12px", cursor:"pointer"}}>↩ Reset to default</button>}
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
 
       <div style={S.card}>
         <div style={S.cardTitle}>{course.name}</div>
