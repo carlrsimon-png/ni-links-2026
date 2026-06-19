@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "2.4";
+const APP_VERSION = "2.9";
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
 const AUTH_KEY = "ni-links-auth";
 const GROUP_PIN = "2026";
@@ -25,36 +25,36 @@ const ITINERARY = [
 ];
 
 const COURSES = [
-  { name:"Ardglass", location:"Ardglass, Co. Down", par:70, url:"https://ardglassgolfclub.com/",
+  { name:"Ardglass", location:"Ardglass, Co. Down", par:71, url:"https://ardglassgolfclub.com/",
     scorecard:"https://ardglassgolfclub.com/",
     note:"Founded 1896. Dramatic cliffs, 14th-century castle clubhouse.",
     tees:[{label:"White",slope:117},{label:"Green",slope:121},{label:"Custom",slope:126}],
-    pars:[4,3,4,4,3,4,3,4,5, 3,5,3,4,4,5,4,4,4],
-    si:  [10,16,6,14,18,4,12,2,8, 13,3,7,1,11,15,5,9,17] },
+    pars:[4,3,4,4,3,4,3,4,5, 4,5,3,4,4,5,5,3,4],
+    si:  [10,14,16,6,18,4,12,2,8, 13,3,7,1,11,15,5,9,17] },
   { name:"Royal County Down", location:"Newcastle, Co. Down", par:71, url:"https://www.royalcountydown.org/",
     scorecard:"https://www.royalcountydown.org/championship_links",
     note:"World Top 5. Old Tom Morris original. Mourne Mountains backdrop.",
     tees:[{label:"Championship",slope:142},{label:"Medal",slope:131},{label:"Yellow",slope:134}],
     pars:[5,4,4,3,4,4,3,4,4, 3,4,5,4,3,4,4,4,5],
-    si:  [8,2,4,14,10,6,16,12,18, 15,5,1,3,17,9,13,7,11] },
+    si:  [13,9,3,15,7,11,17,1,5, 18,8,16,2,12,4,14,10,6] },
   { name:"Castlerock (Mussenden)", location:"Castlerock, Co. Derry", par:73, url:"https://www.castlerockgc.co.uk/",
-    scorecard:"https://www.castlerockgc.co.uk/",
-    note:"Est. 1901. 'Leg O'Mutton' par 3. Harry Colt design.",
+    scorecard:"https://www.castlerockgc.co.uk/mussenden_course",
+    note:"Est. 1901. 'Leg O'Mutton' par 3. Ben Sayers / Hawtree design.",
     tees:[{label:"White",slope:132},{label:"Yellow",slope:128},{label:"Custom",slope:132}],
-    pars:[4,4,3,3,5,4,4,5,4, 4,5,4,4,3,5,4,4,4],
-    si:  [6,2,14,10,4,8,12,16,18, 7,1,5,3,15,9,11,13,17] },
+    pars:[4,4,5,3,5,4,4,4,3, 4,5,4,4,3,5,3,5,4],
+    si:  [9,5,13,11,15,7,1,3,17, 4,16,2,14,8,6,18,12,10] },
   { name:"Royal Portrush (Dunluce)", location:"Portrush, Co. Antrim", par:72, url:"https://www.royalportrushgolfclub.com/",
     scorecard:"https://www.royalportrushgolfclub.com/courses/the-dunluce/",
     note:"World Top 15. Host of The Open 1951, 2019 & 2025.",
     tees:[{label:"Championship",slope:131},{label:"Visitor",slope:126},{label:"Custom",slope:136}],
-    pars:[4,5,3,4,4,3,5,4,4, 4,4,5,3,4,4,3,4,5],
-    si:  [6,10,16,2,8,14,4,12,18, 3,1,9,17,5,7,15,11,13] },
-  { name:"Portstewart (Strand)", location:"Portstewart, Co. Derry", par:72, url:"https://www.portstewartgc.co.uk/",
-    scorecard:"https://www.portstewartgc.co.uk/",
+    pars:[4,5,3,4,4,3,5,4,4, 4,5,5,3,4,4,3,4,4],
+    si:  [11,5,17,1,15,7,3,13,9, 12,8,4,18,2,14,6,16,10] },
+  { name:"Portstewart (Strand)", location:"Portstewart, Co. Derry", par:71, url:"https://www.portstewartgc.co.uk/",
+    scorecard:"https://www.portstewartgc.co.uk/the-strand/",
     note:"Willie Park / Des Giffin design. 'Thistly Hollow' dunes.",
     tees:[{label:"White",slope:130},{label:"Yellow",slope:126},{label:"Custom",slope:130}],
-    pars:[4,4,4,3,5,4,3,4,5, 4,3,5,4,4,4,4,4,4],
-    si:  [8,4,2,14,6,10,16,12,18, 5,15,1,3,7,9,11,13,17] },
+    pars:[4,4,3,5,4,3,5,4,4, 4,4,3,5,4,3,4,4,4],
+    si:  [3,9,13,7,1,15,17,5,11, 12,6,18,10,4,16,14,2,8] },
 ];
 const COURSE_LABELS = ["ARD","RCD","CST","RPR","PST"];
 
@@ -1122,6 +1122,53 @@ export default function App() {
   var canEditBooks = !isGuest && BOOKKEEPER_IDS.indexOf(auth.playerId) >= 0;
   var booksReadOnly = !canEditBooks;
 
+  // ── Pull-to-refresh ──────────────────────────────────────────────────
+  var pullRef = useRef({ startY: 0, pulling: false, dist: 0 });
+  var pts = useState(0); var pullDist = pts[0], setPullDist = pts[1];
+  var prs = useState(false); var refreshing = prs[0], setRefreshing = prs[1];
+  var PULL_THRESHOLD = 80;
+
+  useEffect(function() {
+    function handleStart(e) {
+      if (refreshing) return;
+      // Only activate when scrolled to the very top of the page
+      if (window.scrollY > 0 || document.documentElement.scrollTop > 0) return;
+      pullRef.current.startY = e.touches[0].clientY;
+      pullRef.current.pulling = true;
+      pullRef.current.dist = 0;
+    }
+    function handleMove(e) {
+      if (!pullRef.current.pulling || refreshing) return;
+      if (window.scrollY > 0 || document.documentElement.scrollTop > 0) {
+        pullRef.current.pulling = false; setPullDist(0); return;
+      }
+      var dy = Math.max(0, e.touches[0].clientY - pullRef.current.startY);
+      var dampened = Math.min(dy * 0.5, 120);
+      if (dampened > 5) { e.preventDefault(); }
+      pullRef.current.dist = dampened;
+      setPullDist(dampened);
+    }
+    function handleEnd() {
+      if (!pullRef.current.pulling || refreshing) return;
+      pullRef.current.pulling = false;
+      if (pullRef.current.dist >= PULL_THRESHOLD) {
+        setRefreshing(true);
+        setPullDist(PULL_THRESHOLD);
+        setTimeout(function() { window.location.reload(); }, 400);
+      } else {
+        setPullDist(0);
+      }
+    }
+    document.addEventListener("touchstart", handleStart, { passive: true });
+    document.addEventListener("touchmove", handleMove, { passive: false });
+    document.addEventListener("touchend", handleEnd, { passive: true });
+    return function() {
+      document.removeEventListener("touchstart", handleStart);
+      document.removeEventListener("touchmove", handleMove);
+      document.removeEventListener("touchend", handleEnd);
+    };
+  });
+
   var TABS = [
     { id:"home", icon:"🏠", label:"Home" },
     { id:"itinerary", icon:"📋", label:"Trip" },
@@ -1146,6 +1193,14 @@ export default function App() {
         <button onClick={handleLogout} style={{fontSize:10, color:CL.muted, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:4, padding:"4px 8px", cursor:"pointer"}}>{isGuest ? "Sign In" : "Switch"}</button>
       </div>
       <div style={S.content}>
+        {/* Pull-to-refresh indicator */}
+        {(pullDist > 0 || refreshing) && (
+          <div style={{display:"flex", justifyContent:"center", alignItems:"center", height:pullDist, overflow:"hidden", transition:pullRef.current.pulling?"none":"height 0.25s ease-out"}}>
+            <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", textAlign:"center"}}>
+              {refreshing ? "↻ Refreshing…" : pullDist >= PULL_THRESHOLD ? "↑ Release to refresh" : "↓ Pull to refresh"}
+            </div>
+          </div>
+        )}
         {activeTab === "home" && <HomeTab players={players} lb={lb} currentPlayer={currentPlayer} weatherCache={state.weatherCache} update={update} isGuest={isGuest} />}
         {activeTab === "itinerary" && <ItineraryTab weatherCache={state.weatherCache} update={update} isGuest={isGuest} />}
         {activeTab === "scores" && <ScoresTab players={players} scores={scores} sel={selectedRound} hole={scoringHole} setHole={setScoringHole} update={update} rs={rs} currentPlayer={currentPlayer} isGuest={isGuest} canEditBooks={canEditBooks} selectedTees={state.selectedTees || [0,0,0,0,0]} />}
