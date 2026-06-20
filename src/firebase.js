@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { getFirestore, doc, setDoc, onSnapshot, collection, addDoc, query, orderBy, limit, deleteDoc } from "firebase/firestore";
+import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, doc, setDoc, onSnapshot, collection, addDoc, query, orderBy, limit, deleteDoc } from "firebase/firestore";
 
 // ╔══════════════════════════════════════════════════════╗
 // ║  REPLACE THESE WITH YOUR FIREBASE PROJECT VALUES    ║
@@ -15,7 +15,20 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
+// Persistent local cache: serves reads from IndexedDB when offline and queues
+// writes durably (survives reloads / tab eviction), syncing automatically when
+// the connection returns. Multi-tab manager keeps the cache consistent if the
+// app is open in more than one tab. Falls back gracefully if IndexedDB is
+// unavailable (e.g. private browsing) — the app still works online.
+let db;
+try {
+  db = initializeFirestore(app, {
+    localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+  });
+} catch (e) {
+  console.warn("Persistent cache unavailable, falling back to memory cache:", e);
+  db = initializeFirestore(app, {});
+}
 
 // ─── Trip state (scores, bets, games, drinks) ───────────
 const TRIP_ID = "ni-links-2026";

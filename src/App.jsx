@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "3.4";
+const APP_VERSION = "3.5";
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
 const AUTH_KEY = "ni-links-auth";
 const GROUP_PIN = "2026";
@@ -688,15 +688,43 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
   return balances;
 }
 
+// Round every player's net balance to whole dollars WITHOUT breaking conservation.
+// Naive per-player rounding can make the table sum to ±a few dollars; instead we
+// round each balance, measure the total drift, then nudge the players we rounded
+// most aggressively by $1 until the set sums back to exactly $0. Guarantees the
+// Net Balances table and the Settle Up transfers always reconcile to the penny.
+function roundBalances(balances, players) {
+  var rounded = {};
+  var resid = [];
+  var sum = 0;
+  players.forEach(function(p) {
+    var v = balances[p.id] || 0;
+    var r = Math.round(v);
+    rounded[p.id] = r;
+    sum += r;
+    resid.push({ id: p.id, frac: v - r }); // how far the raw value sat from its rounded value
+  });
+  var drift = Math.round(sum); // integer dollars of over/under-allocation
+  if (drift !== 0) {
+    var dir = drift > 0 ? -1 : 1; // over-credited → subtract $1s; over-debited → add $1s
+    var n = Math.abs(drift);
+    // Adjust the players whose rounding error best absorbs the nudge.
+    resid.sort(function(a, b) { return dir < 0 ? a.frac - b.frac : b.frac - a.frac; });
+    for (var i = 0; i < n && i < resid.length; i++) rounded[resid[i].id] += dir;
+  }
+  return rounded;
+}
+
 // Greedy min-cash-flow: turn net balances into a short list of who-pays-whom.
 function calculateSettleUp(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible) {
-  var balances = computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible);
+  var raw = computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible);
+  var balances = roundBalances(raw, players); // whole-dollar, still sums to $0
   var creditors = [];
   var debtors = [];
   players.forEach(function(p) {
     var b = balances[p.id] || 0;
-    if (b > 0.01) creditors.push({ id:p.id, name:p.name, emoji:p.emoji, amount:b });
-    else if (b < -0.01) debtors.push({ id:p.id, name:p.name, emoji:p.emoji, amount:-b });
+    if (b > 0) creditors.push({ id:p.id, name:p.name, emoji:p.emoji, amount:b });
+    else if (b < 0) debtors.push({ id:p.id, name:p.name, emoji:p.emoji, amount:-b });
   });
 
   creditors.sort(function(a,b) { return b.amount - a.amount; });
@@ -706,13 +734,13 @@ function calculateSettleUp(players, games, bets, h2hBets, teamMatches, individua
   var ci = 0, di = 0;
   while (ci < creditors.length && di < debtors.length) {
     var amount = Math.min(creditors[ci].amount, debtors[di].amount);
-    if (amount > 0.01) {
-      transfers.push({ from:debtors[di], to:creditors[ci], amount:Math.round(amount) });
+    if (amount > 0) {
+      transfers.push({ from:debtors[di], to:creditors[ci], amount:amount });
     }
     creditors[ci].amount -= amount;
     debtors[di].amount -= amount;
-    if (creditors[ci].amount <= 0.01) ci++;
-    if (debtors[di].amount <= 0.01) di++;
+    if (creditors[ci].amount <= 0) ci++;
+    if (debtors[di].amount <= 0) di++;
   }
   return transfers;
 }
@@ -906,6 +934,22 @@ export default function App() {
     return { authed:authState ? authState.authed : false, playerId:authState ? authState.playerId : null, loaded:true };
   });
   var auth = as[0], setAuth = as[1];
+
+  // Track connectivity so we can reassure players their entries are queued, not lost,
+  // when signal drops out on the course. Firestore's persistent cache handles the
+  // actual queue + sync; this is purely the visual cue.
+  var onl = useState(typeof navigator !== "undefined" ? navigator.onLine !== false : true);
+  var online = onl[0], setOnline = onl[1];
+  useEffect(function() {
+    function goOnline() { setOnline(true); }
+    function goOffline() { setOnline(false); }
+    window.addEventListener("online", goOnline);
+    window.addEventListener("offline", goOffline);
+    return function() {
+      window.removeEventListener("online", goOnline);
+      window.removeEventListener("offline", goOffline);
+    };
+  }, []);
 
   // Real-time Firebase subscription for game state
   var hasLoadedData = useRef(false);
@@ -1240,9 +1284,10 @@ export default function App() {
           <span style={{fontSize:16}}>{currentPlayer ? currentPlayer.emoji : "👁️"}</span>
           <span style={{fontSize:12, color:"#fff", fontFamily:"system-ui", fontWeight:600}}>{currentPlayer ? currentPlayer.name : "Guest"}</span>
           {isGuest && <span style={{fontSize:10, color:CL.muted, fontFamily:"system-ui", background:"rgba(111,172,255,0.15)", padding:"2px 8px", borderRadius:10}}>view only</span>}
-          {!isGuest && saveStatus === "saving" && <span style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>● saving…</span>}
-          {!isGuest && saveStatus === "saved" && <span style={{fontSize:10, color:"#22c55e", fontFamily:"system-ui"}}>✓ saved</span>}
-          {!isGuest && saveStatus === "error" && <span style={{fontSize:10, color:CL.red, fontFamily:"system-ui"}}>⚠ not saved</span>}
+          {!online && <span style={{fontSize:10, color:"#f59e0b", fontFamily:"system-ui", background:"rgba(245,158,11,0.15)", padding:"2px 8px", borderRadius:10}}>⚡ offline — saved locally</span>}
+          {!isGuest && online && saveStatus === "saving" && <span style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>● saving…</span>}
+          {!isGuest && online && saveStatus === "saved" && <span style={{fontSize:10, color:"#22c55e", fontFamily:"system-ui"}}>✓ saved</span>}
+          {!isGuest && online && saveStatus === "error" && <span style={{fontSize:10, color:CL.red, fontFamily:"system-ui"}}>⚠ not saved</span>}
         </div>
         <button onClick={handleLogout} style={{fontSize:10, color:CL.muted, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:4, padding:"4px 8px", cursor:"pointer"}}>{isGuest ? "Sign In" : "Switch"}</button>
       </div>
@@ -2635,9 +2680,11 @@ function BetsTab(props) {
   var eis = useState(null); var editId = eis[0], setEditId = eis[1];
 
   function netMoney(pid) {
-    // One source of truth — identical math to the Settle Up transfers.
-    var balances = computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible);
-    return balances[pid] || 0;
+    // One source of truth — identical math to the Settle Up transfers, rounded
+    // to whole dollars the same conserving way so both screens always agree.
+    var raw = computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible);
+    var rounded = roundBalances(raw, players);
+    return rounded[pid] || 0;
   }
 
   function totalDrinks(pid) { var d = drinks[pid]; if (!d) return 0; return (d.pints||0)+(d.whiskey||0)+(d.wine||0)+(d.other||0); }
