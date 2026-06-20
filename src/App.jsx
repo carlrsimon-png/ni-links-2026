@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "3.5";
+const APP_VERSION = "3.6";
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
 const AUTH_KEY = "ni-links-auth";
 const GROUP_PIN = "2026";
@@ -361,6 +361,24 @@ function getTotalStableford(scores, pid, handicap) {
 // GROSS Stableford — same scoring but no strokes given (handicap = 0).
 function getTotalGrossStableford(scores, pid) {
   return getTotalStableford(scores, pid, 0);
+}
+
+// A round is "complete" for a set of players once each has all 18 holes posted.
+function roundComplete(scores, ri, ids) {
+  if (!ids || ids.length === 0) return false;
+  return ids.every(function(pid) {
+    var h = scores[pid] && scores[pid][ri];
+    if (!h) return false;
+    for (var i = 0; i < 18; i++) { if (h[i] == null) return false; }
+    return true;
+  });
+}
+
+// Score-based money is "final" only when every round is fully posted for the
+// relevant players. Until then the standings (and the dollars they imply) are live.
+function tripComplete(scores, ids) {
+  for (var ri = 0; ri < COURSES.length; ri++) { if (!roundComplete(scores, ri, ids)) return false; }
+  return true;
 }
 
 // Compute skins for a round. Returns { results: [{hole, winner(pid), value, pushed}], totals: {pid: count} }
@@ -2327,33 +2345,43 @@ function ScoresTab(props) {
         </div>
       )}
 
-      {hole && (
+      {hole && (function() {
+        var curName = (players.find(function(p) { return p.id===hole.playerId; }) || {}).name;
+        // After recording a hole (score or clear), jump straight to the next one so a
+        // full round is entered without reopening the picker each time. Closes after 18.
+        function advance() { if (hole.hole < 17) setHole({playerId:hole.playerId, hole:hole.hole+1}); else setHole(null); }
+        function goPrev() { if (hole.hole > 0) setHole({playerId:hole.playerId, hole:hole.hole-1}); }
+        function goNext() { if (hole.hole < 17) setHole({playerId:hole.playerId, hole:hole.hole+1}); }
+        var filledCount = 0;
+        for (var fi=0; fi<18; fi++) { var fv = scores[hole.playerId] && scores[hole.playerId][sel] && scores[hole.playerId][sel][fi]; if (fv != null) filledCount++; }
+        return (
         <div style={S.modal} onClick={function() { setHole(null); }}>
           <div style={S.modalBox} onClick={function(e) { e.stopPropagation(); }}>
-            <div style={{textAlign:"center", marginBottom:16}}>
-              <div style={{fontSize:18, fontWeight:700, color:"#fff"}}>
-                {"Hole "+(hole.hole+1)}
+            {/* Header with prev / next navigation */}
+            <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12}}>
+              <button onClick={goPrev} style={{background:"none", border:"1px solid "+CL.border, borderRadius:8, color:hole.hole>0?"#fff":CL.border, fontSize:20, fontWeight:700, fontFamily:"system-ui", width:40, height:40, cursor:hole.hole>0?"pointer":"default", lineHeight:1}}>‹</button>
+              <div style={{textAlign:"center"}}>
+                <div style={{fontSize:18, fontWeight:700, color:"#fff"}}>{"Hole "+(hole.hole+1)}</div>
+                <div style={{fontSize:13, color:CL.muted, fontFamily:"system-ui"}}>{curName}</div>
               </div>
-              <div style={{fontSize:14, color:CL.muted, fontFamily:"system-ui", marginTop:2}}>
-                {(players.find(function(p) { return p.id===hole.playerId; }) || {}).name}
+              <button onClick={goNext} style={{background:"none", border:"1px solid "+CL.border, borderRadius:8, color:hole.hole<17?"#fff":CL.border, fontSize:20, fontWeight:700, fontFamily:"system-ui", width:40, height:40, cursor:hole.hole<17?"pointer":"default", lineHeight:1}}>›</button>
+            </div>
+            <div style={{display:"flex", justifyContent:"center", gap:16, marginBottom:14}}>
+              <div style={{textAlign:"center"}}>
+                <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>PAR</div>
+                <div style={{fontSize:20, fontWeight:700, color:CL.red, fontFamily:"system-ui"}}>{course.pars ? course.pars[hole.hole] : "—"}</div>
               </div>
-              <div style={{display:"flex", justifyContent:"center", gap:16, marginTop:8}}>
-                <div style={{textAlign:"center"}}>
-                  <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>PAR</div>
-                  <div style={{fontSize:20, fontWeight:700, color:CL.red, fontFamily:"system-ui"}}>{course.pars ? course.pars[hole.hole] : "—"}</div>
-                </div>
-                <div style={{textAlign:"center"}}>
-                  <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>SI</div>
-                  <div style={{fontSize:20, fontWeight:700, color:CL.blue, fontFamily:"system-ui"}}>{course.si ? course.si[hole.hole] : "—"}</div>
-                </div>
-                <div style={{textAlign:"center"}}>
-                  <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>HOLE</div>
-                  <div style={{fontSize:20, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{hole.hole+1}</div>
-                </div>
+              <div style={{textAlign:"center"}}>
+                <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>SI</div>
+                <div style={{fontSize:20, fontWeight:700, color:CL.blue, fontFamily:"system-ui"}}>{course.si ? course.si[hole.hole] : "—"}</div>
+              </div>
+              <div style={{textAlign:"center"}}>
+                <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>DONE</div>
+                <div style={{fontSize:20, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{filledCount+"/18"}</div>
               </div>
             </div>
-            <div style={{display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:8, marginBottom:12}}>
-              {[1,2,3,4,5,6,7,8,9,10].map(function(s) {
+            <div style={{display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:8, marginBottom:12}}>
+              {[1,2,3,4,5,6,7,8,9,10,11,12].map(function(s) {
                 var cur = scores[hole.playerId] && scores[hole.playerId][sel] && scores[hole.playerId][sel][hole.hole];
                 var hp = course.pars ? course.pars[hole.hole] : null;
                 var isBirdie = hp && s < hp;
@@ -2361,13 +2389,17 @@ function ScoresTab(props) {
                 var isActive = cur === s;
                 var btnBg = isActive ? CL.red : isBirdie ? "rgba(34,197,94,0.15)" : isBogey ? "rgba(220,38,38,0.1)" : "rgba(30,58,95,0.3)";
                 var btnBorder = isActive ? CL.red : isBirdie ? "rgba(34,197,94,0.3)" : isBogey ? "rgba(220,38,38,0.2)" : CL.border;
-                return <button key={s} style={Object.assign({}, S.scoreBtn, {background:btnBg, borderColor:btnBorder, color:isActive ? "#fff" : "#fff"})} onClick={function() { setScore(hole.playerId, hole.hole, s); setHole(null); }}>{s}</button>;
+                return <button key={s} style={Object.assign({}, S.scoreBtn, {background:btnBg, borderColor:btnBorder, color:"#fff"})} onClick={function() { setScore(hole.playerId, hole.hole, s); advance(); }}>{s}</button>;
               })}
             </div>
-            <button style={S.secondaryBtn} onClick={function() { setScore(hole.playerId, hole.hole, null); setHole(null); }}>Clear</button>
+            <div style={{display:"flex", gap:8}}>
+              <button style={Object.assign({}, S.secondaryBtn, {flex:1, margin:0})} onClick={function() { setScore(hole.playerId, hole.hole, null); advance(); }}>Clear &amp; Next</button>
+              <button style={{flex:1, padding:14, borderRadius:8, border:"none", background:CL.red, color:"#fff", fontSize:16, fontWeight:700, fontFamily:"system-ui", cursor:"pointer"}} onClick={function() { setHole(null); }}>Done</button>
+            </div>
           </div>
         </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
@@ -2649,6 +2681,12 @@ function LeaderboardTab(props) {
 }
 
 // ─── BETS & GAMES ────────────────────────────────────────────────────
+// Small inline pill marking whether a score-derived figure is still live
+// (updating as scores come in) or final (all relevant rounds posted).
+function StatusTag(props) {
+  if (props.final) return <span style={{fontSize:9, fontWeight:700, color:"#22c55e", background:"rgba(34,197,94,0.15)", border:"1px solid rgba(34,197,94,0.35)", borderRadius:8, padding:"2px 7px", fontFamily:"system-ui", marginLeft:8, letterSpacing:0.3, verticalAlign:"middle", whiteSpace:"nowrap"}}>✓ FINAL</span>;
+  return <span style={{fontSize:9, fontWeight:700, color:"#f59e0b", background:"rgba(245,158,11,0.15)", border:"1px solid rgba(245,158,11,0.35)", borderRadius:8, padding:"2px 7px", fontFamily:"system-ui", marginLeft:8, letterSpacing:0.3, verticalAlign:"middle", whiteSpace:"nowrap"}}>● LIVE</span>;
+}
 function BetsTab(props) {
   var players = props.players, games = props.games, bets = props.bets;
   var scores = props.scores || {};
@@ -2658,6 +2696,11 @@ function BetsTab(props) {
   var individualProps = props.individualProps || DEFAULT_INDIVIDUAL_PROPS;
   var expenses = props.expenses || [];
   var addingGame = props.addingGame, update = props.update, resetAll = props.resetAll;
+
+  // Whole-trip completion: score-derived money (Team & Individual Stableford, the
+  // trip-total skins) is final once every player has all 18 holes on all 5 rounds.
+  var allIds = players.map(function(p) { return p.id; });
+  var tripDone = tripComplete(scores, allIds);
 
   var ts = useState("team"); var tab = ts[0], setTab = ts[1];
   var gts = useState("skins"); var gameType = gts[0], setGameType = gts[1];
@@ -2825,7 +2868,7 @@ function BetsTab(props) {
           <div>
             {/* Team Stableford matchup — the main event */}
             <div style={S.card}>
-              <div style={S.cardTitle}>🏆 Team Stableford — The Main Event</div>
+              <div style={S.cardTitle}>🏆 Team Stableford — The Main Event<StatusTag final={tripDone} /></div>
               <div style={Object.assign({}, S.label, {marginBottom:4})}>Overall team competition. Net Stableford points across all 5 rounds. All 4 scores count each round. More points wins.</div>
               <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginBottom:12, fontWeight:600}}>$100/man · Winning team's 4 players each win $100</div>
               <div style={{display:"flex", gap:8, alignItems:"stretch"}}>
@@ -2921,7 +2964,7 @@ function BetsTab(props) {
         return (
           <div>
             <div style={S.card}>
-              <div style={S.cardTitle}>⛳ Individual Gross Stableford</div>
+              <div style={S.cardTitle}>⛳ Individual Gross Stableford<StatusTag final={tripDone} /></div>
               <div style={Object.assign({}, S.label, {marginBottom:12})}>Most GROSS Stableford points across all 5 rounds wins each group. Winner takes the whole pot.</div>
               {renderBracket(GROSS_GROUP_A.name, GROSS_GROUP_A.emoji, brackets.a)}
               {renderBracket(GROSS_GROUP_B.name, GROSS_GROUP_B.emoji, brackets.b)}
@@ -2967,7 +3010,7 @@ function BetsTab(props) {
               var pushedAtEnd = rd && rd.carry > 1 ? rd.carry - 1 : 0;
               return (
                 <div style={S.card} key={ri}>
-                  <div style={S.cardTitle}>{"\uD83D\uDD2A " + course.name}</div>
+                  <div style={S.cardTitle}>{"\uD83D\uDD2A " + course.name}{eligible.length >= 2 && played ? <StatusTag final={roundComplete(scores, ri, eligible)} /> : null}</div>
                   <div style={Object.assign({}, S.label, {marginBottom:4})}>{"Net skins \u00B7 Par " + course.par + ". Sole low net score wins the hole; ties push."}</div>
                   <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginBottom:10, fontWeight:600}}>{"$20/skin \u00B7 " + eligible.length + " player" + (eligible.length !== 1 ? "s" : "") + " in"}</div>
 
@@ -3027,7 +3070,7 @@ function BetsTab(props) {
               var top = standings.length ? standings[0].skins : 0;
               return (
                 <div style={S.card}>
-                  <div style={S.cardTitle}>{emoji + " " + label}</div>
+                  <div style={S.cardTitle}>{emoji + " " + label}{eligible.length >= 2 ? <StatusTag final={tripComplete(scores, eligible)} /> : null}</div>
                   <div style={Object.assign({}, S.label, {marginBottom:4})}>{(useNet ? "Net" : "Gross") + " skins across all 5 rounds \u2014 one combined pot. Sole low score on a hole wins; ties push."}</div>
                   <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginBottom:10, fontWeight:600}}>{"$20/skin \u00B7 whole trip \u00B7 " + eligible.length + " player" + (eligible.length !== 1 ? "s" : "") + " in"}</div>
                   <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginBottom:4}}>Who's in:</div>
@@ -3518,8 +3561,10 @@ function BetsTab(props) {
                     <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>
                       {transfers.length + " payment" + (transfers.length !== 1 ? "s" : "") + " to settle every bet — Team & Individual Stableford, Skins, Props, H2H, side games, and expenses."}
                     </div>
-                    <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginTop:6, fontStyle:"italic"}}>
-                      Score-based bets (Stableford & Skins) update live and lock in once all rounds are scored.
+                    <div style={{fontSize:11, color:tripDone ? "#22c55e" : "#f59e0b", fontFamily:"system-ui", marginTop:6, fontStyle:"italic"}}>
+                      {tripDone
+                        ? "✓ All rounds posted — score-based bets are final."
+                        : "● Live — Stableford & Skins update as scores come in and lock once all 5 rounds are posted. Amounts shown are provisional."}
                     </div>
                   </div>
                 </div>
@@ -3527,7 +3572,7 @@ function BetsTab(props) {
             })()}
           </div>
           <div style={S.card}>
-            <div style={S.cardTitle}>Net Balances</div>
+            <div style={S.cardTitle}>Net Balances<StatusTag final={tripDone} /></div>
             {players.map(function(p) { return Object.assign({}, p, {net:netMoney(p.id)}); }).sort(function(a,b) { return b.net - a.net; }).map(function(p) {
               return (
                 <div key={p.id} style={Object.assign({display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 0", fontSize:14, color:"#fff"}, S.separator)}>
