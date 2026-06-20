@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "3.6";
+const APP_VERSION = "3.7";
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
 const AUTH_KEY = "ni-links-auth";
 const GROUP_PIN = "2026";
@@ -943,6 +943,13 @@ export default function App() {
   var sh = useState(null); var scoringHole = sh[0], setScoringHole = sh[1];
   var sv = useState("idle"); var saveStatus = sv[0], setSaveStatus = sv[1];
   var lcs = useState(0); var latestChatTs = lcs[0], setLatestChatTs = lcs[1];
+  var cms = useState([]); var chatMsgs = cms[0], setChatMsgs = cms[1];
+  // In-app toast cards + optional native notifications for new chat messages.
+  var tst = useState([]); var toasts = tst[0], setToasts = tst[1];
+  var npm = useState(typeof Notification !== "undefined" ? Notification.permission : "unsupported");
+  var notifPerm = npm[0], setNotifPerm = npm[1];
+  var chatInit = useRef(false);
+  var seenChatIds = useRef({});
   var scs = useState(function() {
     try { return parseInt(localStorage.getItem("ni-links-chat-seen") || "0", 10) || 0; } catch(e) { return 0; }
   });
@@ -1060,19 +1067,55 @@ export default function App() {
     return function() { unsub(); };
   }, []);
 
-  // Lightweight chat subscription at the app level — only tracks the newest
-  // message timestamp so we can show an unread badge on the Chat tab.
+  // Lightweight chat subscription at the app level — stores messages so we can
+  // show an unread badge AND surface toasts/notifications for new arrivals.
   useEffect(function() {
     var unsub = subscribeToChat(function(msgs) {
-      if (!msgs || !msgs.length) return;
+      if (!msgs) return;
+      setChatMsgs(msgs);
       var newest = 0;
       msgs.forEach(function(m) {
         if (m && m.ts) { var t = new Date(m.ts).getTime(); if (t > newest) newest = t; }
       });
-      setLatestChatTs(newest);
+      if (newest) setLatestChatTs(newest);
     });
     return function() { unsub(); };
   }, []);
+
+  // Surface a toast (and a native notification if backgrounded) for genuinely new
+  // chat messages from other people. Seeds the "seen" set on first load so the
+  // whole history doesn't fire at once.
+  function pushNotifs(items) {
+    if (!items.length) return;
+    setToasts(function(cur) {
+      return cur.concat(items.map(function(it) { return Object.assign({}, it, { id: Math.random().toString(36).slice(2) }); })).slice(-3);
+    });
+    if (typeof Notification !== "undefined" && Notification.permission === "granted" && document.visibilityState === "hidden") {
+      items.forEach(function(it) { try { new Notification(it.title, { body: it.body }); } catch (e) {} });
+    }
+  }
+  useEffect(function() {
+    if (!chatInit.current) {
+      chatMsgs.forEach(function(m) { if (m && m.id) seenChatIds.current[m.id] = true; });
+      chatInit.current = true;
+      return;
+    }
+    var fresh = chatMsgs.filter(function(m) { return m && m.id && !seenChatIds.current[m.id]; });
+    fresh.forEach(function(m) { seenChatIds.current[m.id] = true; });
+    if (state.activeTab !== "chat") {
+      var fromOthers = fresh.filter(function(m) { return m.playerId !== auth.playerId; });
+      pushNotifs(fromOthers.map(function(m) {
+        return { icon: "💬", title: ((m.emoji || "") + " " + (m.playerName || "")).trim() || "New message", body: m.text, tab: "chat" };
+      }));
+    }
+  }, [chatMsgs, state.activeTab]);
+
+  // Auto-dismiss toasts after a few seconds.
+  useEffect(function() {
+    if (!toasts.length) return;
+    var timers = toasts.map(function(t) { return setTimeout(function() { setToasts(function(cur) { return cur.filter(function(x) { return x.id !== t.id; }); }); }, 4500); });
+    return function() { timers.forEach(clearTimeout); };
+  }, [toasts]);
 
   // When the user opens the Chat tab, mark everything as seen.
   useEffect(function() {
@@ -1307,8 +1350,30 @@ export default function App() {
           {!isGuest && online && saveStatus === "saved" && <span style={{fontSize:10, color:"#22c55e", fontFamily:"system-ui"}}>✓ saved</span>}
           {!isGuest && online && saveStatus === "error" && <span style={{fontSize:10, color:CL.red, fontFamily:"system-ui"}}>⚠ not saved</span>}
         </div>
-        <button onClick={handleLogout} style={{fontSize:10, color:CL.muted, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:4, padding:"4px 8px", cursor:"pointer"}}>{isGuest ? "Sign In" : "Switch"}</button>
+        <div style={{display:"flex", alignItems:"center", gap:8}}>
+          {!isGuest && notifPerm === "default" && (
+            <button onClick={function() { if (typeof Notification !== "undefined") Notification.requestPermission().then(setNotifPerm); }} title="Turn on alerts for new chat messages" style={{fontSize:13, background:"none", border:"1px solid "+CL.border, borderRadius:4, padding:"3px 8px", cursor:"pointer"}}>🔔</button>
+          )}
+          <button onClick={handleLogout} style={{fontSize:10, color:CL.muted, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:4, padding:"4px 8px", cursor:"pointer"}}>{isGuest ? "Sign In" : "Switch"}</button>
+        </div>
       </div>
+
+      {/* Toast stack for new chat messages */}
+      {toasts.length > 0 && (
+        <div style={{position:"fixed", top:54, left:"50%", transform:"translateX(-50%)", width:"100%", maxWidth:480, zIndex:200, display:"flex", flexDirection:"column", gap:8, padding:"0 12px", boxSizing:"border-box", pointerEvents:"none"}}>
+          {toasts.map(function(t) {
+            return (
+              <button key={t.id} onClick={function() { setState(function(prev) { return Object.assign({}, prev, { activeTab:t.tab }); }); setToasts(function(cur) { return cur.filter(function(x) { return x.id !== t.id; }); }); }} style={{pointerEvents:"auto", textAlign:"left", display:"flex", gap:10, alignItems:"center", background:CL.card, color:"#fff", border:"1px solid "+CL.border, borderLeft:"3px solid "+CL.red, borderRadius:10, padding:"10px 14px", boxShadow:"0 8px 24px rgba(0,0,0,.45)", fontFamily:"system-ui", cursor:"pointer"}}>
+                <span style={{fontSize:18, flex:"none"}}>{t.icon}</span>
+                <span style={{minWidth:0}}>
+                  <span style={{display:"block", fontSize:12, fontWeight:800, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{t.title}</span>
+                  <span style={{display:"block", fontSize:12, color:CL.muted, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{t.body}</span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
       <div style={S.content}>
         {/* Pull-to-refresh indicator */}
         {(pullDist > 0 || refreshing) && (
@@ -1493,6 +1558,8 @@ function HomeTab(props) {
           );
         })}
       </div>
+
+      <TodayWeatherCard />
 
       {lb.length > 0 && (
         <div style={S.card}>
@@ -1722,6 +1789,125 @@ var WEATHER_LOCATIONS = [
   { key:"portrush", label:"Royal Portrush", lat:55.2069, lng:-6.6561 },
   { key:"portstewart", label:"Portstewart", lat:55.1833, lng:-6.7233 },
 ];
+
+// Resolve which location's weather to show "today" by referencing the trip
+// schedule — today's course during the trip, a preview of the first course
+// before it, Dublin after. Coordinates match the course/hotel map stops.
+function getTodayWeatherTarget() {
+  var ARD = { lat:54.2608, lng:-5.6100, label:"Ardglass" };
+  var RCD = { lat:54.2150, lng:-5.8960, label:"Royal County Down" };
+  var CST = { lat:55.1647, lng:-6.7742, label:"Castlerock" };
+  var RPR = { lat:55.2069, lng:-6.6561, label:"Royal Portrush" };
+  var PST = { lat:55.1833, lng:-6.7233, label:"Portstewart" };
+  var DUB = { lat:53.3382, lng:-6.2591, label:"Dublin" };
+  var td = getTripDay();
+  if (td.status === "pre") return Object.assign({}, ARD, { sub:"Preview · first round Sat Jun 27 at Ardglass" });
+  if (td.status === "post") return Object.assign({}, DUB, { sub:"Trip complete · Dublin" });
+  var map = {
+    1:[ARD, "Arrival day · first round tomorrow at Ardglass"],
+    2:[ARD, "Round 1 · Ardglass · Tee 2:30 PM"],
+    3:[RCD, "Round 2 · Royal County Down · Tee 2:21 PM"],
+    4:[CST, "Round 3 · Castlerock · Tee 1:06 PM"],
+    5:[RPR, "Round 4 · Royal Portrush · Tee 9:40 AM"],
+    6:[PST, "Round 5 · Portstewart · Tee 10:30 AM"],
+    7:[DUB, "Travel day · Dublin → home"],
+    8:[DUB, "Dublin"],
+  };
+  var e = map[td.day] || map[2];
+  return Object.assign({}, e[0], { sub:e[1] });
+}
+
+// Hourly forecast for wherever the group is today (per the schedule): temp,
+// rain chance, and wind across the golf-relevant daylight window.
+function TodayWeatherCard() {
+  var target = getTodayWeatherTarget();
+  var d = useState(null); var data = d[0], setData = d[1];
+  var ld = useState(false); var loading = ld[0], setLoading = ld[1];
+  var er = useState(null); var err = er[0], setErr = er[1];
+
+  function fetchToday() {
+    setLoading(true); setErr(null);
+    var url = "https://api.open-meteo.com/v1/forecast?latitude=" + target.lat + "&longitude=" + target.lng +
+      "&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m" +
+      "&hourly=temperature_2m,precipitation_probability,weather_code,wind_speed_10m" +
+      "&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=Europe/London&forecast_days=2";
+    fetch(url)
+      .then(function(r) { return r.json(); })
+      .then(function(j) {
+        if (!j || !j.hourly || !j.current) { setErr("Weather unavailable. Try again."); setLoading(false); return; }
+        var today = (j.hourly.time[0] || "").slice(0, 10); // API's local "today"
+        var hours = [];
+        for (var i = 0; i < j.hourly.time.length; i++) {
+          var t = j.hourly.time[i];
+          if (t.slice(0, 10) !== today) continue;
+          var hr = parseInt(t.slice(11, 13), 10);
+          if (hr < 6 || hr > 21) continue; // daylight golf window
+          var h12 = ((hr + 11) % 12) + 1;
+          hours.push({
+            label: h12 + (hr < 12 ? "a" : "p"),
+            temp: Math.round(j.hourly.temperature_2m[i]),
+            rain: j.hourly.precipitation_probability ? (j.hourly.precipitation_probability[i] || 0) : 0,
+            wind: Math.round(j.hourly.wind_speed_10m[i]),
+            code: j.hourly.weather_code[i],
+          });
+        }
+        setData({
+          current: { temp: Math.round(j.current.temperature_2m), feels: Math.round(j.current.apparent_temperature), wind: Math.round(j.current.wind_speed_10m), code: j.current.weather_code },
+          hours: hours,
+        });
+        setLoading(false);
+      })
+      .catch(function() { setErr("Couldn't load weather — check your connection."); setLoading(false); });
+  }
+
+  useEffect(function() { fetchToday(); }, [target.lat, target.lng]);
+
+  return (
+    <div style={S.card}>
+      <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4}}>
+        <div style={S.cardTitle}>🌦️ Weather Today</div>
+        <button onClick={fetchToday} disabled={loading} style={Object.assign({}, S.addBtn, {fontSize:11, opacity:loading?0.6:1})}>{loading ? "…" : "Refresh"}</button>
+      </div>
+      <div style={{fontSize:16, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{target.label}</div>
+      <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginBottom:10}}>{target.sub}</div>
+
+      {err && <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", padding:8}}>{err}</div>}
+      {loading && !data && <div style={{textAlign:"center", padding:16, color:CL.muted, fontFamily:"system-ui", fontSize:12}}>Loading hourly forecast…</div>}
+
+      {data && (
+        <div>
+          <div style={{display:"flex", alignItems:"center", gap:12, padding:12, background:"rgba(37,99,235,0.1)", borderRadius:8, marginBottom:12, border:"1px solid rgba(37,99,235,0.2)"}}>
+            <div style={{fontSize:34}}>{weatherIcon(wmoCondition(data.current.code))}</div>
+            <div>
+              <div style={{fontSize:24, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{data.current.temp + "°F"}</div>
+              <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui"}}>{wmoCondition(data.current.code) + " · feels " + data.current.feels + "°"}</div>
+            </div>
+            <div style={{marginLeft:"auto", textAlign:"right", fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>{"💨 " + data.current.wind + " mph"}</div>
+          </div>
+
+          {data.hours.length === 0 ? (
+            <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", textAlign:"center", padding:8}}>No hourly data for today.</div>
+          ) : (
+            <div style={{display:"flex", gap:8, overflowX:"auto", paddingBottom:6, WebkitOverflowScrolling:"touch"}}>
+              {data.hours.map(function(h, i) {
+                return (
+                  <div key={i} style={{flex:"none", width:62, textAlign:"center", background:"rgba(30,58,95,0.25)", border:"1px solid "+CL.border, borderRadius:8, padding:"8px 4px"}}>
+                    <div style={{fontSize:11, color:"#fff", fontWeight:700, fontFamily:"system-ui"}}>{h.label}</div>
+                    <div style={{fontSize:18, margin:"3px 0"}}>{weatherIcon(wmoCondition(h.code))}</div>
+                    <div style={{fontSize:14, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{h.temp + "°"}</div>
+                    <div style={{fontSize:10, color:h.rain>=40?CL.blue:CL.muted, fontFamily:"system-ui", marginTop:3}}>{"🌧 " + h.rain + "%"}</div>
+                    <div style={{fontSize:10, color:h.wind>=20?"#f59e0b":CL.muted, fontFamily:"system-ui"}}>{"💨 " + h.wind}</div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <div style={{fontSize:10, color:CL.muted, fontFamily:"system-ui", marginTop:8, textAlign:"center"}}>Hourly · 6am–9pm local · scroll for more · Open-Meteo</div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function WeatherCard(props) {
   var cache = props.weatherCache, update = props.update;
