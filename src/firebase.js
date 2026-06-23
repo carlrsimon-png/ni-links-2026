@@ -24,20 +24,57 @@ let db;
 try {
   db = initializeFirestore(app, {
     localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+    // Firestore throws on undefined field values (same failure class as nested
+    // arrays). Skipping them instead means one stray undefined can't silently
+    // kill an entire save.
+    ignoreUndefinedProperties: true,
   });
 } catch (e) {
   console.warn("Persistent cache unavailable, falling back to memory cache:", e);
-  db = initializeFirestore(app, {});
+  db = initializeFirestore(app, { ignoreUndefinedProperties: true });
 }
 
 // ─── Trip state (scores, bets, games, drinks) ───────────
 const TRIP_ID = "ni-links-2026";
 const tripRef = doc(db, "trips", TRIP_ID);
 
+// Firestore forbids an array directly inside another array, but the app stores
+// skinsEligible.course as an array-of-arrays. We transparently wrap any nested
+// array as { __arr: [...] } on the way out and unwrap it on the way in, so the
+// in-app data shape never has to change. Without this, every full-document save
+// throws "Nested arrays are not supported" and silently persists nothing.
+function encodeNested(val) {
+  if (Array.isArray(val)) {
+    return val.map(function(item) {
+      return Array.isArray(item) ? { __arr: encodeNested(item) } : encodeNested(item);
+    });
+  }
+  if (val && typeof val === "object") {
+    var out = {};
+    Object.keys(val).forEach(function(k) { out[k] = encodeNested(val[k]); });
+    return out;
+  }
+  return val;
+}
+function decodeNested(val) {
+  if (Array.isArray(val)) {
+    return val.map(function(item) { return decodeNested(item); });
+  }
+  if (val && typeof val === "object") {
+    if (Object.keys(val).length === 1 && Array.isArray(val.__arr)) {
+      return decodeNested(val.__arr);
+    }
+    var out = {};
+    Object.keys(val).forEach(function(k) { out[k] = decodeNested(val[k]); });
+    return out;
+  }
+  return val;
+}
+
 export function subscribeToState(callback) {
   return onSnapshot(tripRef, function(snap) {
     if (snap.exists()) {
-      callback(snap.data());
+      callback(decodeNested(snap.data()));
     } else {
       callback(null);
     }
@@ -48,8 +85,9 @@ export function subscribeToState(callback) {
 }
 
 export function saveState(data) {
-  return setDoc(tripRef, data, { merge: true }).catch(function(err) {
+  return setDoc(tripRef, encodeNested(data), { merge: true }).catch(function(err) {
     console.error("Save failed:", err);
+    throw err; // surface real failures so the UI shows "error" instead of a false "saved"
   });
 }
 
@@ -62,7 +100,7 @@ export function saveScorePath(pid, ri, holeArr) {
   var field = "scores." + pid + "." + ri;
   var payload = {};
   payload[field] = holeArr;
-  return updateDoc(tripRef, payload).catch(function(err) {
+  return updateDoc(tripRef, encodeNested(payload)).catch(function(err) {
     console.error("Score save failed:", err);
     throw err; // let the caller surface a "not saved" indicator
   });

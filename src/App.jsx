@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, saveScorePath, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "3.10";
+const APP_VERSION = "3.13";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
@@ -10,6 +10,16 @@ const AUTH_KEY = "ni-links-auth";
 const GROUP_PIN = "2026";
 // Only these players (Brian Smith, Carl Simon) can edit Bets & Expenses — the "gatekeepers" of the books.
 const BOOKKEEPER_IDS = ["p2", "p6"];
+
+// ── Wager amounts ──────────────────────────────────────────────────────────
+// Single source of truth for every stake. Both the money math AND the on-screen
+// labels read these, so a change here updates payouts and text together. (These
+// were previously duplicated as local vars and bare literals across the file,
+// which risked the trip-total skins pot paying a different rate than the rest.)
+const STAKE_TEAM = 100;   // Team Stableford, $/man
+const STAKE_GROSS = 50;   // Individual Gross Stableford bracket, $/man
+const STAKE_SKIN = 20;    // Skins, $/skin — per-course AND trip-total pots
+const DEFAULT_BUYIN = 25; // Individual-prop buy-in fallback
 
 // Gross Stableford group names — two distinct Northern Ireland landmarks.
 const GROSS_GROUP_A = { name:"The Mournes", emoji:"⛰️" };   // Mountains of Mourne, Co. Down (low handicaps)
@@ -583,7 +593,7 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
   if (individualProps) {
     individualProps.forEach(function(prop) {
       if (!prop.settled || !prop.winner) return;
-      var buyin = prop.buyin || 25;
+      var buyin = prop.buyin || DEFAULT_BUYIN;
       var elig = prop.eligible || [];
       // Defensive: a settled prop should always have its winner among the eligible.
       // If somehow not, fall back to crediting just the winner with no debits.
@@ -612,7 +622,7 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
     var tsTotA = getTeamTotalStableford(scores, players, tsA, null);
     var tsTotB = getTeamTotalStableford(scores, players, tsB, null);
     if ((tsTotA > 0 || tsTotB > 0) && tsTotA !== tsTotB && tsA.length > 0 && tsB.length > 0) {
-      var TS_STAKE = 100;
+      var TS_STAKE = STAKE_TEAM;
       var tsWinIds = tsTotA > tsTotB ? tsA : tsB;
       var tsLoseIds = tsTotA > tsTotB ? tsB : tsA;
       var tsWinEach = (TS_STAKE * tsLoseIds.length) / tsWinIds.length;
@@ -625,7 +635,7 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
   // ($50/man). Every player in a bracket buys in; the bracket's gross-Stableford
   // leader collects the pot. A tie at the top is left unresolved (no money yet).
   if (scores) {
-    var GS_STAKE = 50;
+    var GS_STAKE = STAKE_GROSS;
     var gsBrackets = getGrossBrackets(players);
     [gsBrackets.a, gsBrackets.b].forEach(function(ids) {
       if (!ids || ids.length < 2) return;
@@ -647,7 +657,7 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
   // Skins — five independent per-course games. Net scoring, $20/skin, opt-in per course.
   // A skin pays its winner $20 from every other eligible player in that course's game.
   if (scores && skinsEligible && skinsEligible.course) {
-    var SK_STAKE = 20;
+    var SK_STAKE = STAKE_SKIN;
     COURSES.forEach(function(c, ri) {
       var skElig = (skinsEligible.course[ri]) || [];
       if (skElig.length < 2) return;
@@ -677,7 +687,7 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
       if (grand === 0) return;
       elig.forEach(function(pid) {
         var won = totals[pid] || 0;
-        balances[pid] = (balances[pid] || 0) + (won * 20 * (elig.length - 1) - (grand - won) * 20);
+        balances[pid] = (balances[pid] || 0) + (won * STAKE_SKIN * (elig.length - 1) - (grand - won) * STAKE_SKIN);
       });
     });
   }
@@ -1073,6 +1083,15 @@ export default function App() {
   useEffect(function() {
     var unsub = subscribeToChat(function(msgs) {
       if (!msgs) return;
+      // On the FIRST real delivery, mark every existing message as already seen so
+      // the whole history doesn't fire toasts on load/refresh. This MUST happen here
+      // (where the messages actually exist) — doing it in the notif effect below ran
+      // on mount before any messages had arrived, so it seeded nothing and then the
+      // entire history was treated as "new" and stacked up at the top of the screen.
+      if (!chatInit.current) {
+        msgs.forEach(function(m) { if (m && m.id) seenChatIds.current[m.id] = true; });
+        chatInit.current = true;
+      }
       setChatMsgs(msgs);
       var newest = 0;
       msgs.forEach(function(m) {
@@ -1096,11 +1115,9 @@ export default function App() {
     }
   }
   useEffect(function() {
-    if (!chatInit.current) {
-      chatMsgs.forEach(function(m) { if (m && m.id) seenChatIds.current[m.id] = true; });
-      chatInit.current = true;
-      return;
-    }
+    // Seeding now happens on the first subscription delivery (above). Until that
+    // has run, there's nothing meaningful to compare against.
+    if (!chatInit.current) return;
     var fresh = chatMsgs.filter(function(m) { return m && m.id && !seenChatIds.current[m.id]; });
     fresh.forEach(function(m) { seenChatIds.current[m.id] = true; });
     if (state.activeTab !== "chat") {
@@ -1216,7 +1233,10 @@ export default function App() {
         saveTimer.current = setTimeout(function() {
           firebaseSave({
             players: next.players,
-            scores: next.scores,
+            // NOTE: scores are intentionally NOT written here. They go through
+            // saveScorePath (targeted field-path writes) exclusively, so including
+            // the whole scores map in this debounced full-document save would let a
+            // bet/expense edit clobber another phone's recent score entries.
             games: next.games,
             bets: next.bets,
             individualProps: next.individualProps,
@@ -2974,7 +2994,7 @@ function BetsTab(props) {
   }
 
   function addGame() {
-    update({games:games.concat([{id:Date.now().toString(), type:gameType, stake:parseFloat(stake), round:round, results:Object.assign({},results), ts:new Date().toISOString()}]), addingGame:false});
+    update({games:games.concat([{id:Date.now().toString(), type:gameType, stake:parseFloat(stake)||0, round:round, results:Object.assign({},results), ts:new Date().toISOString()}]), addingGame:false});
     setResults({});
   }
 
@@ -3038,7 +3058,7 @@ function BetsTab(props) {
             });
             individualProps.forEach(function(prop) {
               if (!prop.settled || !prop.winner) return;
-              var buyin = prop.buyin || 25;
+              var buyin = prop.buyin || DEFAULT_BUYIN;
               if (pid === prop.winner) total += buyin * (players.length - 1);
               else total -= buyin;
             });
@@ -3100,7 +3120,7 @@ function BetsTab(props) {
             <div style={S.card}>
               <div style={S.cardTitle}>🏆 Team Stableford — The Main Event<StatusTag final={tripDone} /></div>
               <div style={Object.assign({}, S.label, {marginBottom:4})}>Overall team competition. Net Stableford points across all 5 rounds. All 4 scores count each round. More points wins.</div>
-              <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginBottom:12, fontWeight:600}}>$100/man · Winning team's 4 players each win $100</div>
+              <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginBottom:12, fontWeight:600}}>{"$"+STAKE_TEAM+"/man · Winning team's players each win $"+STAKE_TEAM}</div>
               <div style={{display:"flex", gap:8, alignItems:"stretch"}}>
                 <div style={Object.assign({}, S.teamBox, aLead ? S.teamBoxWin : {}, {textAlign:"center"})}>
                   <div style={{fontSize:24, marginBottom:2}}>{matchup.teamA.emoji}</div>
@@ -3176,7 +3196,7 @@ function BetsTab(props) {
             <div style={{marginBottom:14}}>
               <div style={{display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:6}}>
                 <div style={{fontSize:14, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{emoji+" "+label}</div>
-                <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", fontWeight:600}}>{"$50/man · $"+pot+" winner-take-all"}</div>
+                <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", fontWeight:600}}>{"$"+STAKE_GROSS+"/man · $"+pot+" winner-take-all"}</div>
               </div>
               {rows.map(function(r, i) {
                 var isLeader = r.pts !== null && r.pts === leaderPts;
@@ -3210,7 +3230,7 @@ function BetsTab(props) {
           {(function() {
             // Per-course skins: five independent bets, one per course. Net scoring, $20/skin,
             // each with its own opt-in. Sole low net score on a hole wins; ties push (carry).
-            var SK_STAKE = 20;
+            var SK_STAKE = STAKE_SKIN;
             function toggleSkinCourse(ri, pid) {
               var se = Object.assign({}, skinsEligible);
               var arr = (se.course || []).slice();
@@ -3242,7 +3262,7 @@ function BetsTab(props) {
                 <div style={S.card} key={ri}>
                   <div style={S.cardTitle}>{"\uD83D\uDD2A " + course.name}{eligible.length >= 2 && played ? <StatusTag final={roundComplete(scores, ri, eligible)} /> : null}</div>
                   <div style={Object.assign({}, S.label, {marginBottom:4})}>{"Net skins \u00B7 Par " + course.par + ". Sole low net score wins the hole; ties push."}</div>
-                  <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginBottom:10, fontWeight:600}}>{"$20/skin \u00B7 " + eligible.length + " player" + (eligible.length !== 1 ? "s" : "") + " in"}</div>
+                  <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginBottom:10, fontWeight:600}}>{"$"+STAKE_SKIN+"/skin \u00B7 " + eligible.length + " player" + (eligible.length !== 1 ? "s" : "") + " in"}</div>
 
                   <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginBottom:4}}>Who's in:</div>
                   <div style={{display:"flex", gap:4, flexWrap:"wrap", marginBottom:12}}>
@@ -3302,7 +3322,7 @@ function BetsTab(props) {
                 <div style={S.card}>
                   <div style={S.cardTitle}>{emoji + " " + label}{eligible.length >= 2 ? <StatusTag final={tripComplete(scores, eligible)} /> : null}</div>
                   <div style={Object.assign({}, S.label, {marginBottom:4})}>{(useNet ? "Net" : "Gross") + " skins across all 5 rounds \u2014 one combined pot. Sole low score on a hole wins; ties push."}</div>
-                  <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginBottom:10, fontWeight:600}}>{"$20/skin \u00B7 whole trip \u00B7 " + eligible.length + " player" + (eligible.length !== 1 ? "s" : "") + " in"}</div>
+                  <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginBottom:10, fontWeight:600}}>{"$"+STAKE_SKIN+"/skin \u00B7 whole trip \u00B7 " + eligible.length + " player" + (eligible.length !== 1 ? "s" : "") + " in"}</div>
                   <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginBottom:4}}>Who's in:</div>
                   <div style={{display:"flex", gap:4, flexWrap:"wrap", marginBottom:12}}>
                     {players.map(function(p) {
@@ -3318,7 +3338,7 @@ function BetsTab(props) {
                     <div>
                       {standings.map(function(x, i) {
                         var isLeader = x.skins > 0 && x.skins === top;
-                        var net = x.skins * 20 * (eligible.length - 1) - (grand - x.skins) * 20;
+                        var net = x.skins * STAKE_SKIN * (eligible.length - 1) - (grand - x.skins) * STAKE_SKIN;
                         return (
                           <div key={x.p.id} style={Object.assign({display:"flex", alignItems:"center", padding:"7px 0", gap:10}, i < standings.length - 1 ? S.separator : {}, isLeader ? {background:"rgba(34,197,94,0.08)", margin:"0 -8px", padding:"7px 8px", borderRadius:6} : {})}>
                             <div style={{fontSize:15}}>{x.p.emoji}</div>
@@ -3353,7 +3373,7 @@ function BetsTab(props) {
                 {renderTotalSkins("gross", "Total Gross Skins", "\u26F3")}
                 {renderTotalSkins("net", "Total Net Skins", "\uD83C\uDFAF")}
                 <div style={{fontSize:12, fontWeight:700, color:"#fff", fontFamily:"system-ui", padding:"14px 4px 6px"}}>Per course \u00B7 five separate games</div>
-                <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", padding:"0 4px 8px"}}>One net skins game per course, $20/skin. Opt in per course; each settles on its own.</div>
+                <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", padding:"0 4px 8px"}}>{"One net skins game per course, $"+STAKE_SKIN+"/skin. Opt in per course; each settles on its own."}</div>
                 {COURSES.map(function(c, ri) { return renderCourseSkins(ri); })}
               </div>
             );
@@ -3370,7 +3390,7 @@ function BetsTab(props) {
             {individualProps.map(function(prop) {
               var winner = players.find(function(x) { return x.id === prop.winner; });
               var eligible = prop.eligible || [];
-              var pot = (prop.buyin || 25) * eligible.length;
+              var pot = (prop.buyin || DEFAULT_BUYIN) * eligible.length;
               // Compute the current NET leader among eligible players.
               // Stableford-style props (ip8 / ipsf*) use net Stableford points;
               // everything else uses net total score (lower is better).
@@ -3406,7 +3426,7 @@ function BetsTab(props) {
                     <div style={{flex:1}}>
                       <div style={{fontSize:15, fontWeight:600, color:prop.settled?CL.muted:"#fff", textDecoration:prop.settled?"line-through":"none"}}>{prop.name}</div>
                       {prop.desc && <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", marginTop:2}}>{prop.desc}</div>}
-                      <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginTop:2}}>{"$"+(prop.buyin||25)+"/player · "+eligible.length+" in · $"+pot+" pot"}</div>
+                      <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginTop:2}}>{"$"+(prop.buyin||DEFAULT_BUYIN)+"/player · "+eligible.length+" in · $"+pot+" pot"}</div>
                       {leader && <div style={{fontSize:12, color:CL.blue, fontFamily:"system-ui", marginTop:3}}>{leader.tied ? "Tied: "+leader.tiedPlayers.map(function(t){return t.player.name.split(" ")[0];}).join(", ")+" ("+leader.val+(leader.higherWins?" pts)":" net)") : "Leading: "+leader.player.emoji+" "+leader.player.name.split(" ")[0]+" ("+leader.val+(leader.higherWins?" pts)":" net)")}</div>}
                     </div>
                     {!prop.settled && props.canEdit && <button onClick={function() { if (confirm("Delete this prop?")) update({individualProps:individualProps.filter(function(x) { return x.id!==prop.id; })}); }} style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:14, flexShrink:0}}>🗑</button>}
