@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { subscribeToState, saveState as firebaseSave, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
+import { subscribeToState, saveState as firebaseSave, saveScorePath, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "3.7";
+const APP_VERSION = "3.10";
+// Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
+var SHOW_MATCH_PLAY = false;
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
 const AUTH_KEY = "ni-links-auth";
 const GROUP_PIN = "2026";
@@ -140,10 +142,10 @@ const DEFAULT_PLAYERS = [
 
 const TEAM_MATCHUPS = [
   {
-    id:"wasps_v_italians",
-    name:"WASPs vs Italians",
-    teamA: { name:"WASPs", emoji:"🦅", names:["Brian Smith","Mark McGrath","Carl Simon","Rory Callagy"] },
-    teamB: { name:"Italians", emoji:"🇮🇹", names:["Jeff Andrea","Daniel DiBiasio","Steve Lopiano","Eric Ferraris"] },
+    id:"public_v_private",
+    name:"Public vs Private",
+    teamA: { name:"Public", emoji:"🌐", names:["Brian Smith","Mark McGrath","Carl Simon","Steve Lopiano"] },
+    teamB: { name:"Private", emoji:"🔒", names:["Jeff Andrea","Daniel DiBiasio","Rory Callagy","Eric Ferraris"] },
   },
 ];
 
@@ -161,7 +163,6 @@ const DRINK_TYPES = [
   { id:"other", emoji:"🍹", label:"Other" },
 ];
 
-const EMOJIS = ["🔴","🔵","⚪","🟡","🟢","🟣","🟠","🟤"];
 
 const EXPENSE_CATEGORIES = [
   { id:"meals", emoji:"🍽️", label:"Meals" },
@@ -217,15 +218,6 @@ function getRoundScore(scores, pid, ri) {
 }
 
 // Total GROSS strokes across all 5 rounds for a player (only counts completed rounds).
-function getTotalGross(scores, pid) {
-  var total = 0, any = false;
-  for (var ri = 0; ri < COURSES.length; ri++) {
-    var r = getRoundScore(scores, pid, ri);
-    if (r !== null) { total += r; any = true; }
-  }
-  return any ? total : null;
-}
-
 // Split players into two gross brackets by handicap index:
 // Group A = lowest 4 HIs, Group B = highest 4 HIs. Returns {a:[ids], b:[ids]}.
 function getGrossBrackets(players) {
@@ -400,6 +392,7 @@ function computeSkins(scores, players, eligibleIds, ri, useNet) {
       var val = raw;
       if (useNet) {
         var p = players.find(function(x) { return x.id === pid; });
+        if (!p) return; // stale/removed eligible id — skip rather than crash on p.handicap
         var ch = getCourseHandicap(p.handicap, ri);
         var si = course.si ? course.si[h] : 99;
         val = raw - strokesOnHole(ch, si);
@@ -974,7 +967,7 @@ export default function App() {
       window.removeEventListener("online", goOnline);
       window.removeEventListener("offline", goOffline);
     };
-  }, []);
+  }, [setOnline]);
 
   // Real-time Firebase subscription for game state
   var hasLoadedData = useRef(false);
@@ -1041,6 +1034,14 @@ export default function App() {
             COURSES.forEach(function(_, i) { merged.scores[p.id][i] = Array(18).fill(null); });
           }
         });
+        // Device-local UI state must never come from the synced doc. An older
+        // build once persisted these into Firestore; with merge:true they linger
+        // and would otherwise override the local tab/round on every snapshot —
+        // e.g. forcing the app onto the Chat tab after a refresh.
+        delete merged.activeTab;
+        delete merged.selectedRound;
+        delete merged.addingGame;
+        delete merged.initialized;
         setState(function(prev) { return Object.assign({}, prev, merged, { initialized:true }); });
       } else if (!hasLoadedData.current) {
         // First time only — seed Firestore with defaults.
@@ -1065,7 +1066,7 @@ export default function App() {
       setLoading(false);
     });
     return function() { unsub(); };
-  }, []);
+  }, [setLoading, setState]);
 
   // Lightweight chat subscription at the app level — stores messages so we can
   // show an unread badge AND surface toasts/notifications for new arrivals.
@@ -1080,7 +1081,7 @@ export default function App() {
       if (newest) setLatestChatTs(newest);
     });
     return function() { unsub(); };
-  }, []);
+  }, [setChatMsgs, setLatestChatTs]);
 
   // Surface a toast (and a native notification if backgrounded) for genuinely new
   // chat messages from other people. Seeds the "seen" set on first load so the
@@ -1108,6 +1109,9 @@ export default function App() {
         return { icon: "💬", title: ((m.emoji || "") + " " + (m.playerName || "")).trim() || "New message", body: m.text, tab: "chat" };
       }));
     }
+    // auth.playerId is fixed per session and pushNotifs is recreated each render;
+    // both are intentionally excluded so this only fires on new messages / tab changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatMsgs, state.activeTab]);
 
   // Auto-dismiss toasts after a few seconds.
@@ -1115,7 +1119,7 @@ export default function App() {
     if (!toasts.length) return;
     var timers = toasts.map(function(t) { return setTimeout(function() { setToasts(function(cur) { return cur.filter(function(x) { return x.id !== t.id; }); }); }, 4500); });
     return function() { timers.forEach(clearTimeout); };
-  }, [toasts]);
+  }, [toasts, setToasts]);
 
   // When the user opens the Chat tab, mark everything as seen.
   useEffect(function() {
@@ -1123,7 +1127,7 @@ export default function App() {
       setChatSeenTs(latestChatTs);
       try { localStorage.setItem("ni-links-chat-seen", String(latestChatTs)); } catch(e) {}
     }
-  }, [state.activeTab, latestChatTs]);
+  }, [state.activeTab, latestChatTs, setChatSeenTs]);
 
   var hasUnreadChat = latestChatTs > chatSeenTs;
 
@@ -1233,7 +1237,36 @@ export default function App() {
       }
       return next;
     });
-  }, []);
+  }, [setSaveStatus, setState]);
+
+  // Clobber-safe score writer. Updates local state immediately for a snappy UI,
+  // then writes ONLY this player's/round's hole array to Firestore (field-path
+  // write) instead of the whole scores map — see saveScorePath in firebase.js.
+  // Debounced per player+round so rapid hole entry doesn't hammer the network.
+  var scoreSaveTimers = useRef({});
+  var saveScore = useCallback(function(pid, ri, holeArr) {
+    if (guestRef.current) return; // guests never write
+    // 1) Local state — merge just this player's round, leaving everyone else intact.
+    setState(function(prev) {
+      var nextScores = Object.assign({}, prev.scores);
+      nextScores[pid] = Object.assign({}, nextScores[pid]);
+      nextScores[pid][ri] = holeArr;
+      return Object.assign({}, prev, { scores: nextScores });
+    });
+    // 2) Remote write — debounced per (player, round) so concurrent scorers for
+    //    different players never overwrite one another.
+    var key = pid + "_" + ri;
+    setSaveStatus("saving");
+    clearTimeout(scoreSaveTimers.current[key]);
+    scoreSaveTimers.current[key] = setTimeout(function() {
+      saveScorePath(pid, ri, holeArr).then(function() {
+        setSaveStatus("saved");
+        setTimeout(function() { setSaveStatus("idle"); }, 1500);
+      }).catch(function() {
+        setSaveStatus("error");
+      });
+    }, 500);
+  }, [setSaveStatus, setState]);
 
   var resetAll = function() {
     if (!confirm("Reset all scores, bets, and drinks? This cannot be undone.")) return;
@@ -1262,6 +1295,10 @@ export default function App() {
   var selectedRound = p.selectedRound, addingGame = p.addingGame;
   // Keep live COURSES (par/SI) in sync with any gatekeeper overrides before scoring runs.
   applyCourseOverrides(state.courseOverrides);
+  // state.courseOverrides is listed on purpose: getLeaderboard reads the COURSES
+  // objects that applyCourseOverrides mutates, so the leaderboard must recompute
+  // when overrides change even though it isn't referenced by name.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   var lb = useMemo(function() { return getLeaderboard(players, scores); }, [players, scores, state.courseOverrides]);
   var rs = useCallback(function(pid, ri) { return getRoundScore(scores, pid, ri); }, [scores]);
 
@@ -1385,7 +1422,7 @@ export default function App() {
         )}
         {activeTab === "home" && <HomeTab players={players} lb={lb} currentPlayer={currentPlayer} weatherCache={state.weatherCache} update={update} isGuest={isGuest} />}
         {activeTab === "itinerary" && <ItineraryTab weatherCache={state.weatherCache} update={update} isGuest={isGuest} />}
-        {activeTab === "scores" && <ScoresTab players={players} scores={scores} sel={selectedRound} hole={scoringHole} setHole={setScoringHole} update={update} rs={rs} currentPlayer={currentPlayer} isGuest={isGuest} canEditBooks={canEditBooks} selectedTees={state.selectedTees || [0,0,0,0,0]} courseOverrides={state.courseOverrides || {}} />}
+        {activeTab === "scores" && <ScoresTab players={players} scores={scores} sel={selectedRound} hole={scoringHole} setHole={setScoringHole} update={update} saveScore={saveScore} rs={rs} currentPlayer={currentPlayer} isGuest={isGuest} canEditBooks={canEditBooks} selectedTees={state.selectedTees || [0,0,0,0,0]} courseOverrides={state.courseOverrides || {}} />}
         {activeTab === "leaderboard" && <LeaderboardTab players={players} scores={scores} lb={lb} rs={rs} currentPlayer={currentPlayer} />}
         {activeTab === "bets" && (isGuest ? (
           <div style={{padding:"60px 24px", textAlign:"center"}}>
@@ -1466,7 +1503,7 @@ function FxCard() {
     // Refresh hourly while the app is open
     var iv = setInterval(load, 3600000);
     return function() { cancelled = true; clearInterval(iv); };
-  }, []);
+  }, [setErr, setRate]);
 
   return (
     <div style={Object.assign({}, S.card, {display:"flex", justifyContent:"space-between", alignItems:"center"})}>
@@ -1498,7 +1535,7 @@ function HomeTab(props) {
   useEffect(function() {
     var iv = setInterval(function() { setTime(getCountdown()); }, 1000);
     return function() { clearInterval(iv); };
-  }, []);
+  }, [setTime]);
 
   return (
     <div>
@@ -1860,6 +1897,8 @@ function TodayWeatherCard() {
       .catch(function() { setErr("Couldn't load weather — check your connection."); setLoading(false); });
   }
 
+  // Refetch only when the target coordinates change; fetchToday is intentionally excluded.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(function() { fetchToday(); }, [target.lat, target.lng]);
 
   return (
@@ -1963,6 +2002,9 @@ function WeatherCard(props) {
   // Auto-load on first mount or when stale
   useEffect(function() {
     if (isStale) fetchWeather(locIdx);
+    // Mount-only on purpose: locIdx/isStale/fetchWeather are read at first run and
+    // intentionally excluded to avoid refetch loops.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function switchLocation(idx) {
@@ -2146,6 +2188,7 @@ function ItineraryTab(props) {
 function ScoresTab(props) {
   var players = props.players, scores = props.scores, sel = props.sel;
   var hole = props.hole, setHole = props.setHole, update = props.update, rs = props.rs;
+  var saveScore = props.saveScore;
   var course = COURSES[sel];
 
   var sc = useState(false); var scanning = sc[0], setScanning = sc[1];
@@ -2192,28 +2235,22 @@ function ScoresTab(props) {
 
   function setScore(pid, h, val) {
     if (props.isGuest) return;
-    var ns = JSON.parse(JSON.stringify(scores));
-    if (!ns[pid]) ns[pid] = {};
-    if (!ns[pid][sel]) ns[pid][sel] = Array(18).fill(null);
-    ns[pid][sel][h] = val;
-    update({ scores:ns });
+    var cur = (scores[pid] && scores[pid][sel]) ? scores[pid][sel].slice() : Array(18).fill(null);
+    cur[h] = val;
+    saveScore(pid, sel, cur);
   }
 
   function bulkSet(pid, arr) {
     if (props.isGuest) return;
-    var ns = JSON.parse(JSON.stringify(scores));
-    if (!ns[pid]) ns[pid] = {};
-    ns[pid][sel] = arr.slice(0,18).map(function(s) { return s > 0 ? s : null; });
-    update({ scores:ns });
+    var clean = arr.slice(0, 18).map(function(s) { return s > 0 ? s : null; });
+    while (clean.length < 18) clean.push(null);
+    saveScore(pid, sel, clean);
     setScanData(null); setScanning(false);
   }
 
   function clearRound(pid) {
     if (props.isGuest) return;
-    var ns = JSON.parse(JSON.stringify(scores));
-    if (!ns[pid]) ns[pid] = {};
-    ns[pid][sel] = Array(18).fill(null);
-    update({ scores:ns });
+    saveScore(pid, sel, Array(18).fill(null));
   }
 
   function handlePhoto(e) {
@@ -2592,7 +2629,7 @@ function ScoresTab(props) {
 
 // ─── LEADERBOARD ─────────────────────────────────────────────────────
 function LeaderboardTab(props) {
-  var players = props.players, scores = props.scores, lb = props.lb, rs = props.rs;
+  var players = props.players, scores = props.scores, rs = props.rs;
   var vs = useState("individual"); var view = vs[0], setView = vs[1];
   var ns = useState("gross"); var scoreMode = ns[0], setScoreMode = ns[1];
 
@@ -2621,11 +2658,6 @@ function LeaderboardTab(props) {
     ids.forEach(function(pid) { t += getPlayerTotal(pid); });
     return t;
   }
-
-  var sortedPlayers = players
-    .map(function(p) { return Object.assign({}, p, { displayTotal: getPlayerTotal(p.id) }); })
-    .filter(function(p) { return p.displayTotal > 0; })
-    .sort(function(a, b) { return a.displayTotal - b.displayTotal; });
 
   var matchup = TEAM_MATCHUPS[0];
   var aIds = resolveTeam(matchup.teamA, players);
@@ -2875,12 +2907,16 @@ function StatusTag(props) {
 }
 function BetsTab(props) {
   var players = props.players, games = props.games, bets = props.bets;
-  var scores = props.scores || {};
-  var customBets = props.customBets, h2hBets = props.h2hBets || [], drinks = props.drinks || {};
-  var skinsEligible = props.skinsEligible || { gross: [], net: [], course: [[],[],[],[],[]] };
+  var drinks = props.drinks || {};
+  // Stabilize defaulted props so the netBalances memo below isn't recomputed
+  // every render: a bare `props.x || []` would hand back a fresh array/object
+  // each render when the prop is empty, changing identity and defeating the memo.
+  var scores = useMemo(function() { return props.scores || {}; }, [props.scores]);
+  var h2hBets = useMemo(function() { return props.h2hBets || []; }, [props.h2hBets]);
+  var skinsEligible = useMemo(function() { return props.skinsEligible || { gross: [], net: [], course: [[],[],[],[],[]] }; }, [props.skinsEligible]);
+  var expenses = useMemo(function() { return props.expenses || []; }, [props.expenses]);
   var teamMatches = props.teamMatches || DEFAULT_TEAM_MATCHES;
   var individualProps = props.individualProps || DEFAULT_INDIVIDUAL_PROPS;
-  var expenses = props.expenses || [];
   var addingGame = props.addingGame, update = props.update, resetAll = props.resetAll;
 
   // Whole-trip completion: score-derived money (Team & Individual Stableford, the
@@ -2908,12 +2944,18 @@ function BetsTab(props) {
   var pes = useState("🔴"); var pEmoji = pes[0], setPEmoji = pes[1];
   var eis = useState(null); var editId = eis[0], setEditId = eis[1];
 
+  // One source of truth — identical math to the Settle Up transfers, rounded to
+  // whole dollars the same conserving way so both screens always agree. Memoized
+  // so the full bet/skins computation runs once per data change instead of once
+  // per player on every render (the Bets tab renders this for all 8 players).
+  var netBalances = useMemo(function() {
+    return roundBalances(
+      computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible),
+      players
+    );
+  }, [players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible]);
   function netMoney(pid) {
-    // One source of truth — identical math to the Settle Up transfers, rounded
-    // to whole dollars the same conserving way so both screens always agree.
-    var raw = computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible);
-    var rounded = roundBalances(raw, players);
-    return rounded[pid] || 0;
+    return netBalances[pid] || 0;
   }
 
   function totalDrinks(pid) { var d = drinks[pid]; if (!d) return 0; return (d.pints||0)+(d.whiskey||0)+(d.wine||0)+(d.other||0); }
@@ -2936,7 +2978,9 @@ function BetsTab(props) {
     setResults({});
   }
 
-  function savePlayer() {
+  // Player add/edit lives in ScoresTab now; this BetsTab copy is unused but kept
+  // (underscore-prefixed) so lint passes without orphaning the editor state above.
+  function _savePlayer() {
     if (!pName.trim()) return;
     if (editId) {
       update({players:players.map(function(p) {
@@ -3427,15 +3471,13 @@ function BetsTab(props) {
         </div>
       )}
 
-      {false && tab === "match" && (
+      {SHOW_MATCH_PLAY && tab === "match" && (
         <div>
           <div style={S.card}>
-            <div style={S.cardTitle}>⚔️ WASPs vs Italians — Match Play</div>
+            <div style={S.cardTitle}>⚔️ {TEAM_MATCHUPS[0].name} — Match Play</div>
             <div style={Object.assign({}, S.label, {marginBottom:12})}>$20/player per round · Best team score wins each course</div>
             {(function() {
               var matchup = TEAM_MATCHUPS[0];
-              var aIds = resolveTeam(matchup.teamA, players);
-              var bIds = resolveTeam(matchup.teamB, players);
               var aWins = 0, bWins = 0, ties = 0;
               teamMatches.forEach(function(m) { if (m.settled) { if (m.winner === "a") aWins++; else if (m.winner === "b") bWins++; else ties++; } });
               var totalSettled = aWins + bWins + ties;
@@ -3539,9 +3581,6 @@ function BetsTab(props) {
                   return b.id === bet.id ? Object.assign({}, b, {settled:true, winningSide:winningSide, winner:winningSide === "a" ? bet.bettor : bet.opponent}) : b;
                 })});
               }
-
-              var bettorP = players.find(function(p) { return p.id===bet.bettor; });
-              var opponentP = players.find(function(p) { return p.id===bet.opponent; });
 
               // Render a player row with label and optional remove button
               function playerRow(pid, isCreator, side, sideColor) {
@@ -3835,23 +3874,6 @@ function ExpensesTab(props) {
   var expSplit = useState(players.map(function(p) { return p.id; })); var splitAmong = expSplit[0], setSplitAmong = expSplit[1];
   var expAdding = useState(false); var adding = expAdding[0], setAdding = expAdding[1];
 
-  function getExpenseBalances() {
-    var bal = {};
-    players.forEach(function(p) { bal[p.id] = 0; });
-    expenses.forEach(function(exp) {
-      if (!exp.payer || !exp.splitAmong || exp.splitAmong.length === 0) return;
-      var perPerson = exp.amount / exp.splitAmong.length;
-      // Payer credited full amount paid
-      bal[exp.payer] = (bal[exp.payer] || 0) + exp.amount;
-      // Everyone in the split debited their share
-      exp.splitAmong.forEach(function(pid) {
-        bal[pid] = (bal[pid] || 0) - perPerson;
-      });
-    });
-    return bal;
-  }
-
-  var balances = getExpenseBalances();
   var totalSpent = expenses.reduce(function(t, e) { return t + (e.amount || 0); }, 0);
 
   function toggleSplit(pid) {
@@ -4023,9 +4045,8 @@ function ExpensesTab(props) {
 
 function ChatTab(props) {
   var currentPlayer = props.currentPlayer;
-  var players = props.players;
   var ms = useState([]); var messages = ms[0], setMessages = ms[1];
-  var ls = useState(true); var chatLoading = ls[0], setChatLoading = ls[1];
+  var ls = useState(true); var setChatLoading = ls[1];
   var ts = useState(""); var text = ts[0], setText = ts[1];
 
   // Real-time Firebase chat subscription
@@ -4035,7 +4056,7 @@ function ChatTab(props) {
       setChatLoading(false);
     });
     return function() { unsub(); };
-  }, []);
+  }, [setChatLoading, setMessages]);
 
   function handleSend() {
     if (props.isGuest || !text.trim() || !currentPlayer) return;

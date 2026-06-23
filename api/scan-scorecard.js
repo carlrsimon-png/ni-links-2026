@@ -16,6 +16,23 @@ export default async function handler(req, res) {
     return;
   }
 
+  // ── Abuse guard ────────────────────────────────────────────────────────
+  // This endpoint spends your Anthropic credits, so only accept calls that
+  // come from the app's own pages. Blocks casual/automated discovery of the
+  // URL. (Not bulletproof — a determined caller can forge these headers with
+  // curl — but proportionate for a private trip. Add the domains below if you
+  // ever move to a custom domain.)
+  var ALLOWED_HOSTS = ["ni-links-2026.vercel.app", "localhost", "127.0.0.1"];
+  function hostOf(u) { try { return new URL(u).hostname; } catch (e) { return ""; } }
+  var srcHost = hostOf(req.headers.origin || "") || hostOf(req.headers.referer || "");
+  var hostAllowed = !srcHost /* absent header → allow, to avoid breaking the app */
+    || ALLOWED_HOSTS.indexOf(srcHost) !== -1
+    || srcHost.indexOf(".vercel.app") === srcHost.length - ".vercel.app".length; // any of this project's Vercel deploys
+  if (srcHost && !hostAllowed) {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+
   var apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     res.status(500).json({ error: "Server is missing ANTHROPIC_API_KEY. Add it in Vercel project settings." });

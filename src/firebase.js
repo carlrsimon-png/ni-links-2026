@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, doc, setDoc, onSnapshot, collection, addDoc, query, orderBy, limit, deleteDoc } from "firebase/firestore";
+import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, doc, setDoc, updateDoc, onSnapshot, collection, addDoc, query, orderBy, limit, deleteDoc } from "firebase/firestore";
 
 // ╔══════════════════════════════════════════════════════╗
 // ║  REPLACE THESE WITH YOUR FIREBASE PROJECT VALUES    ║
@@ -50,6 +50,21 @@ export function subscribeToState(callback) {
 export function saveState(data) {
   return setDoc(tripRef, data, { merge: true }).catch(function(err) {
     console.error("Save failed:", err);
+  });
+}
+
+// Targeted write for a single player's single round of scores. Writes ONLY the
+// field path scores.<pid>.<ri> instead of the whole scores map, so two phones
+// entering scores for DIFFERENT players (or rounds) at the same time can no
+// longer overwrite each other. (Two phones editing the exact same player+round
+// at once is still last-write-wins, but that's a much narrower window.)
+export function saveScorePath(pid, ri, holeArr) {
+  var field = "scores." + pid + "." + ri;
+  var payload = {};
+  payload[field] = holeArr;
+  return updateDoc(tripRef, payload).catch(function(err) {
+    console.error("Score save failed:", err);
+    throw err; // let the caller surface a "not saved" indicator
   });
 }
 
