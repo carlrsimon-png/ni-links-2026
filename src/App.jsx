@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, saveScorePath, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "3.13";
+const APP_VERSION = "3.14";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
@@ -19,6 +19,7 @@ const BOOKKEEPER_IDS = ["p2", "p6"];
 const STAKE_TEAM = 100;   // Team Stableford, $/man
 const STAKE_GROSS = 50;   // Individual Gross Stableford bracket, $/man
 const STAKE_SKIN = 20;    // Skins, $/skin — per-course AND trip-total pots
+const STAKE_FOURSOME = 20;// Foursome Stableford match, $/man (open pool)
 const DEFAULT_BUYIN = 25; // Individual-prop buy-in fallback
 
 // Gross Stableford group names — two distinct Northern Ireland landmarks.
@@ -139,11 +140,39 @@ const DEFAULT_TEAM_MATCHES = [
   { id:"m5", course:"Portstewart", courseIdx:4, teamA:null, teamB:null, settled:false, winner:null, stake:20 },
 ];
 
+// Foursome Stableford matches — two 2-v-2 matches per course (the eight players
+// split into two foursomes; within each, the pairs play a Stableford match).
+// A pair's score is the COMBINED net Stableford of its two core players for that
+// round; the higher pair total wins. The winner is computed LIVE from scores —
+// there's no manual settle. Outside players (the other four) can back either
+// side ("open pool"): everyone on the losing side pays the stake, and that pot
+// is split evenly across everyone on the winning side. Conserves to $0 for any
+// side sizes (same math as Head-to-Head). pairA/pairB are the fixed core pairs;
+// backersA/backersB are outside bettors who've joined a side. Player codes from
+// the pairings: B=p2 C=p6 D=p3 E=p8 J=p1 M=p4 R=p7 S=p5.
+const DEFAULT_FOURSOME_MATCHES = [
+  // Ardglass — M/E v C/D ; S/R v B/J
+  { id:"fm0a", course:"Ardglass", courseIdx:0, pairA:["p4","p8"], pairB:["p6","p3"], backersA:[], backersB:[], stake:STAKE_FOURSOME },
+  { id:"fm0b", course:"Ardglass", courseIdx:0, pairA:["p5","p7"], pairB:["p2","p1"], backersA:[], backersB:[], stake:STAKE_FOURSOME },
+  // Royal County Down — M/B v E/J ; C/R v D/S
+  { id:"fm1a", course:"Royal County Down", courseIdx:1, pairA:["p4","p2"], pairB:["p8","p1"], backersA:[], backersB:[], stake:STAKE_FOURSOME },
+  { id:"fm1b", course:"Royal County Down", courseIdx:1, pairA:["p6","p7"], pairB:["p3","p5"], backersA:[], backersB:[], stake:STAKE_FOURSOME },
+  // Castlerock — M/D v B/R ; S/E v C/J
+  { id:"fm2a", course:"Castlerock", courseIdx:2, pairA:["p4","p3"], pairB:["p2","p7"], backersA:[], backersB:[], stake:STAKE_FOURSOME },
+  { id:"fm2b", course:"Castlerock", courseIdx:2, pairA:["p5","p8"], pairB:["p6","p1"], backersA:[], backersB:[], stake:STAKE_FOURSOME },
+  // Royal Portrush — MM/SL v DD/JA ; BS/CS v EF/RC
+  { id:"fm3a", course:"Royal Portrush", courseIdx:3, pairA:["p4","p5"], pairB:["p3","p1"], backersA:[], backersB:[], stake:STAKE_FOURSOME },
+  { id:"fm3b", course:"Royal Portrush", courseIdx:3, pairA:["p2","p6"], pairB:["p8","p7"], backersA:[], backersB:[], stake:STAKE_FOURSOME },
+  // Portstewart — M/R v S/C ; B/E v D/J
+  { id:"fm4a", course:"Portstewart", courseIdx:4, pairA:["p4","p7"], pairB:["p5","p6"], backersA:[], backersB:[], stake:STAKE_FOURSOME },
+  { id:"fm4b", course:"Portstewart", courseIdx:4, pairA:["p2","p8"], pairB:["p3","p1"], backersA:[], backersB:[], stake:STAKE_FOURSOME },
+];
+
 const DEFAULT_PLAYERS = [
   { id:"p1", name:"Jeff Andrea", handicap:10.2, emoji:"🔴" },
   { id:"p2", name:"Brian Smith", handicap:12.8, emoji:"🔵" },
   { id:"p3", name:"Daniel DiBiasio", handicap:9.2, emoji:"⚪" },
-  { id:"p4", name:"Mark McGrath", handicap:7.0, emoji:"🔴" },
+  { id:"p4", name:"Mark McGrath", handicap:6.1, emoji:"🔴" },
   { id:"p5", name:"Steve Lopiano", handicap:12.1, emoji:"🔵" },
   { id:"p6", name:"Carl Simon", handicap:6.7, emoji:"⚪" },
   { id:"p7", name:"Rory Callagy", handicap:7.2, emoji:"🔴" },
@@ -204,6 +233,7 @@ function defaultState() {
     customBets: [],
     h2hBets: [],
     teamMatches: [],
+    foursomeMatches: DEFAULT_FOURSOME_MATCHES.map(function(m) { return Object.assign({}, m, { backersA: m.backersA.slice(), backersB: m.backersB.slice() }); }),
     drinks: {},
     expenses: [],
     selectedTees: [0, 0, 0, 0, 0],
@@ -527,7 +557,7 @@ function getTripDay() {
 
 // Compute each player's net money balance across every bet, game, and expense.
 // Single source of truth — used by both the Settle Up transfers and Net Balances.
-function computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible) {
+function computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches) {
   var balances = {};
   players.forEach(function(p) { balances[p.id] = 0; });
 
@@ -586,6 +616,54 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
       var loseIds = m.winner === "a" ? bIds : aIds;
       loseIds.forEach(function(pid) { balances[pid] = (balances[pid] || 0) - m.stake; });
       winIds.forEach(function(pid) { balances[pid] = (balances[pid] || 0) + m.stake; });
+    });
+  }
+
+  // Foursome Stableford matches — two 2-v-2 matches per course. Each pair's score
+  // is the COMBINED net Stableford of its two core players for that round; the
+  // higher pair total wins. Outside backers ride along on a side ("open pool"):
+  // every player on the losing side pays `stake`, split evenly across the winning
+  // side. Conserves to $0 for any side sizes. Resolves LIVE once all four core
+  // players have the full round posted and the pair totals aren't tied.
+  if (foursomeMatches && scores) {
+    foursomeMatches.forEach(function(m) {
+      var ri = m.courseIdx;
+      var pairA = m.pairA || [], pairB = m.pairB || [];
+      var core = pairA.concat(pairB);
+      if (core.length === 0) return;
+      // Only final & countable once every core player has all 18 holes in.
+      if (!roundComplete(scores, ri, core)) return;
+      function pairPts(ids) {
+        var t = 0;
+        for (var i = 0; i < ids.length; i++) {
+          var pl = players.find(function(x) { return x.id === ids[i]; });
+          if (!pl) return null;
+          var pts = getRoundStableford(scores, ids[i], ri, pl.handicap);
+          if (pts === null) return null;
+          t += pts;
+        }
+        return t;
+      }
+      var aPts = pairPts(pairA), bPts = pairPts(pairB);
+      if (aPts === null || bPts === null || aPts === bPts) return; // tie/incomplete → no money
+      // Defensive: a backer must be an outsider and on only one side.
+      function cleanBackers(list, otherList) {
+        return (list || []).filter(function(id) {
+          return core.indexOf(id) < 0 && (otherList || []).indexOf(id) < 0;
+        });
+      }
+      var bckA = cleanBackers(m.backersA, m.backersB);
+      var bckB = cleanBackers(m.backersB, m.backersA);
+      var sideA = pairA.concat(bckA);
+      var sideB = pairB.concat(bckB);
+      var stake = m.stake || STAKE_FOURSOME;
+      var winSide = aPts > bPts ? sideA : sideB;
+      var loseSide = aPts > bPts ? sideB : sideA;
+      if (winSide.length === 0) return;
+      var loseTotal = loseSide.length * stake;
+      var winEach = loseTotal / winSide.length;
+      loseSide.forEach(function(pid) { balances[pid] = (balances[pid] || 0) - stake; });
+      winSide.forEach(function(pid) { balances[pid] = (balances[pid] || 0) + winEach; });
     });
   }
 
@@ -737,8 +815,8 @@ function roundBalances(balances, players) {
 }
 
 // Greedy min-cash-flow: turn net balances into a short list of who-pays-whom.
-function calculateSettleUp(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible) {
-  var raw = computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible);
+function calculateSettleUp(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches) {
+  var raw = computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches);
   var balances = roundBalances(raw, players); // whole-dollar, still sums to $0
   var creditors = [];
   var debtors = [];
@@ -1038,6 +1116,23 @@ export default function App() {
         if (!Array.isArray(merged.skinsEligible.net)) merged.skinsEligible.net = [];
         if (!Array.isArray(merged.skinsEligible.course)) merged.skinsEligible.course = [];
         while (merged.skinsEligible.course.length < COURSES.length) merged.skinsEligible.course.push([]);
+        // Seed/sync the foursome Stableford matches. The pairings are fixed in code;
+        // we only carry forward who has BACKED each side (backersA/backersB) from the
+        // saved doc, matched by match id. This keeps the matches present for docs that
+        // predate the feature, and lets the pairings be corrected in code later without
+        // wiping anyone's side bets.
+        (function() {
+          var savedFM = {};
+          (Array.isArray(merged.foursomeMatches) ? merged.foursomeMatches : []).forEach(function(m) {
+            if (m && m.id) savedFM[m.id] = m;
+          });
+          merged.foursomeMatches = DEFAULT_FOURSOME_MATCHES.map(function(def) {
+            var prev = savedFM[def.id];
+            var bA = (prev && Array.isArray(prev.backersA)) ? prev.backersA.slice() : [];
+            var bB = (prev && Array.isArray(prev.backersB)) ? prev.backersB.slice() : [];
+            return Object.assign({}, def, { backersA: bA, backersB: bB });
+          });
+        })();
         merged.players.forEach(function(p) {
           if (!merged.scores[p.id]) {
             merged.scores[p.id] = {};
@@ -1065,6 +1160,7 @@ export default function App() {
           individualProps: fresh.individualProps,
           h2hBets: fresh.h2hBets,
           teamMatches: fresh.teamMatches,
+          foursomeMatches: fresh.foursomeMatches,
           drinks: fresh.drinks,
           expenses: fresh.expenses,
           selectedTees: fresh.selectedTees,
@@ -1185,22 +1281,21 @@ export default function App() {
   var update = useCallback(function(changes) {
     // Master guard: guests can never write synced data to Firebase.
     var isGuestWrite = guestRef.current;
-    // Book guard: only gatekeepers may write most bet/expense data. Strip those
-    // changes for everyone else. EXCEPTION: h2hBets, skinsEligible, and the eligibility
-    // (opt-in) lists inside individualProps — any signed-in player may join/leave a bet.
-    // For individualProps this is NOT a blanket allow: it passes the guard here but is
-    // sanitized to eligibility-only inside setState below, so creating/deleting/settling
-    // props stays gatekeeper-only. Guests still can't write anything.
+    // Book guard: any signed-in player may now create, join, and settle BETS of
+    // every kind (games, team/individual/prop/H2H bets, skins eligibility, and
+    // the foursome Stableford matches). Only the gatekeepers (Brian & Carl) may
+    // still write expenses, the pub-drink tally, and course par/SI overrides.
+    // Guests can write nothing.
     if (!canEditBooksRef.current && !isGuestWrite) {
-      var bookFields = ["games", "bets", "teamMatches", "drinks", "expenses", "customBets", "courseOverrides"];
+      var bookFields = ["drinks", "expenses", "courseOverrides"];
       var stripped = false;
       bookFields.forEach(function(f) {
         if (Object.prototype.hasOwnProperty.call(changes, f)) { delete changes[f]; stripped = true; }
       });
       if (stripped && Object.keys(changes).length === 0) return; // nothing left to apply
     } else if (!canEditBooksRef.current) {
-      // Guests: strip everything including h2hBets
-      var bookFields2 = ["games", "bets", "individualProps", "h2hBets", "teamMatches", "drinks", "expenses", "customBets", "skinsEligible", "courseOverrides"];
+      // Guests: strip everything
+      var bookFields2 = ["games", "bets", "individualProps", "h2hBets", "teamMatches", "foursomeMatches", "drinks", "expenses", "customBets", "skinsEligible", "courseOverrides"];
       var stripped2 = false;
       bookFields2.forEach(function(f) {
         if (Object.prototype.hasOwnProperty.call(changes, f)) { delete changes[f]; stripped2 = true; }
@@ -1209,25 +1304,9 @@ export default function App() {
     }
     setState(function(prev) {
       var applied = changes;
-      // Non-gatekeepers can edit ONLY the opt-in (eligible) lists on props. Rebuild the
-      // props list from prev — no adds or removes — copying across just the `eligible`
-      // arrays for unsettled props. Anything else they tried to change (settle, winner,
-      // name, buy-in, deleting/adding a prop) is discarded here.
-      if (!canEditBooksRef.current && !isGuestWrite && Object.prototype.hasOwnProperty.call(applied, "individualProps")) {
-        var incomingById = {};
-        (applied.individualProps || []).forEach(function(p) { if (p && p.id) incomingById[p.id] = p; });
-        var sanitized = (prev.individualProps || []).map(function(pp) {
-          var inc = incomingById[pp.id];
-          if (inc && Array.isArray(inc.eligible) && !pp.settled) {
-            return Object.assign({}, pp, { eligible: inc.eligible });
-          }
-          return pp;
-        });
-        applied = Object.assign({}, applied, { individualProps: sanitized });
-      }
       var next = Object.assign({}, prev, applied);
       // Save to Firebase (debounced to avoid hammering Firestore) — never for guests
-      if (!isGuestWrite && (changes.scores || changes.players || changes.games || changes.bets || changes.individualProps || changes.h2hBets || changes.teamMatches || changes.drinks || changes.expenses || changes.selectedTees || changes.skinsEligible || changes.courseOverrides)) {
+      if (!isGuestWrite && (changes.scores || changes.players || changes.games || changes.bets || changes.individualProps || changes.h2hBets || changes.teamMatches || changes.foursomeMatches || changes.drinks || changes.expenses || changes.selectedTees || changes.skinsEligible || changes.courseOverrides)) {
         clearTimeout(saveTimer.current);
         setSaveStatus("saving");
         saveTimer.current = setTimeout(function() {
@@ -1242,6 +1321,7 @@ export default function App() {
             individualProps: next.individualProps,
             h2hBets: next.h2hBets,
             teamMatches: next.teamMatches,
+            foursomeMatches: next.foursomeMatches,
             drinks: next.drinks,
             expenses: next.expenses,
             selectedTees: next.selectedTees,
@@ -1300,6 +1380,7 @@ export default function App() {
       individualProps: fresh.individualProps,
       h2hBets: fresh.h2hBets,
       teamMatches: fresh.teamMatches,
+      foursomeMatches: fresh.foursomeMatches,
       drinks: fresh.drinks,
       expenses: fresh.expenses,
       selectedTees: fresh.selectedTees,
@@ -1384,6 +1465,8 @@ export default function App() {
   // Only the bookkeepers (Brian, Carl) may edit Bets & Expenses. Everyone else views them read-only.
   var canEditBooks = !isGuest && BOOKKEEPER_IDS.indexOf(auth.playerId) >= 0;
   var booksReadOnly = !canEditBooks;
+  // Any signed-in player can now manage bets (expenses stay gatekeeper-only).
+  var canEditBets = !isGuest;
 
   var TABS = [
     { id:"home", icon:"🏠", label:"Home" },
@@ -1451,7 +1534,7 @@ export default function App() {
             <div style={{fontSize:14, color:CL.muted, fontFamily:"system-ui", marginBottom:20}}>Sign in with the group passcode to view bets and games.</div>
             <button onClick={handleLogout} style={Object.assign({}, S.primaryBtn, {width:"auto", padding:"12px 32px"})}>Sign In</button>
           </div>
-        ) : <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} isGuest={booksReadOnly} canEdit={canEditBooks} skinsEligible={state.skinsEligible || {gross:[], net:[], course:[[],[],[],[],[]]}} />)}
+        ) : <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} foursomeMatches={state.foursomeMatches || DEFAULT_FOURSOME_MATCHES} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} isGuest={isGuest} canEdit={canEditBets} skinsEligible={state.skinsEligible || {gross:[], net:[], course:[[],[],[],[],[]]}} />)}
         {activeTab === "expenses" && (isGuest ? (
           <div style={{padding:"60px 24px", textAlign:"center"}}>
             <div style={{fontSize:48, marginBottom:16}}>🔒</div>
@@ -2936,6 +3019,7 @@ function BetsTab(props) {
   var skinsEligible = useMemo(function() { return props.skinsEligible || { gross: [], net: [], course: [[],[],[],[],[]] }; }, [props.skinsEligible]);
   var expenses = useMemo(function() { return props.expenses || []; }, [props.expenses]);
   var teamMatches = props.teamMatches || DEFAULT_TEAM_MATCHES;
+  var foursomeMatches = useMemo(function() { return props.foursomeMatches || DEFAULT_FOURSOME_MATCHES; }, [props.foursomeMatches]);
   var individualProps = props.individualProps || DEFAULT_INDIVIDUAL_PROPS;
   var addingGame = props.addingGame, update = props.update, resetAll = props.resetAll;
 
@@ -2970,10 +3054,10 @@ function BetsTab(props) {
   // per player on every render (the Bets tab renders this for all 8 players).
   var netBalances = useMemo(function() {
     return roundBalances(
-      computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible),
+      computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches),
       players
     );
-  }, [players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible]);
+  }, [players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches]);
   function netMoney(pid) {
     return netBalances[pid] || 0;
   }
@@ -3029,7 +3113,7 @@ function BetsTab(props) {
   return (
     <div>
       <div style={S.pageHeader}><div style={S.pageTitle}>Bets & Games</div></div>
-      {props.isGuest && <div style={{margin:"0 16px 8px", padding:"8px 12px", background:"rgba(111,172,255,0.1)", border:"1px solid "+CL.border, borderRadius:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>👁️ Brian & Carl manage the books — but you can Jump In on H2H bets yourself.</div>}
+      {props.isGuest && <div style={{margin:"0 16px 8px", padding:"8px 12px", background:"rgba(111,172,255,0.1)", border:"1px solid "+CL.border, borderRadius:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>👁️ You're viewing as a guest. Sign in as a player to place and settle bets.</div>}
       <div style={{display:"flex", gap:4, padding:"0 16px", marginBottom:8}}>
         {subTabs.map(function(t) { return <button key={t.id} onClick={function() { setTab(t.id); }} style={Object.assign({}, S.subTab, tab===t.id ? S.subTabOn : S.subTabOff)}>{t.label}</button>; })}
       </div>
@@ -3172,6 +3256,117 @@ function BetsTab(props) {
                 );
               })}
             </div>
+
+            {/* Foursome Stableford matches — two 2-v-2 matches per course */}
+            {(function() {
+              function fName(pid) { var p = players.find(function(x){return x.id===pid;}); return p ? p.emoji+" "+p.name.split(" ")[0] : pid; }
+              function pairLive(ids, ri) {
+                var t = 0, any = false;
+                ids.forEach(function(pid) {
+                  var pl = players.find(function(x){return x.id===pid;});
+                  if (!pl) return;
+                  var r = getRoundStableford(scores, pid, ri, pl.handicap);
+                  if (r !== null) { t += r; any = true; }
+                });
+                return any ? t : null;
+              }
+              function backSide(matchId, pid, side) {
+                update({foursomeMatches: foursomeMatches.map(function(m) {
+                  if (m.id !== matchId) return m;
+                  var nm = Object.assign({}, m, { backersA:(m.backersA||[]).slice(), backersB:(m.backersB||[]).slice() });
+                  // never on a core pair, never on both sides
+                  if (nm.pairA.indexOf(pid)>=0 || nm.pairB.indexOf(pid)>=0) return nm;
+                  nm.backersA = nm.backersA.filter(function(id){return id!==pid;});
+                  nm.backersB = nm.backersB.filter(function(id){return id!==pid;});
+                  if (side === "a") nm.backersA.push(pid); else nm.backersB.push(pid);
+                  return nm;
+                })});
+              }
+              function unback(matchId, pid) {
+                update({foursomeMatches: foursomeMatches.map(function(m) {
+                  if (m.id !== matchId) return m;
+                  return Object.assign({}, m, {
+                    backersA:(m.backersA||[]).filter(function(id){return id!==pid;}),
+                    backersB:(m.backersB||[]).filter(function(id){return id!==pid;}),
+                  });
+                })});
+              }
+              return (
+                <div style={S.card}>
+                  <div style={S.cardTitle}>👥 Foursome Matches</div>
+                  <div style={Object.assign({}, S.label, {marginBottom:4})}>Two 2-v-2 Stableford matches per course. Each pair's score is the combined net Stableford of its two players — higher total wins. Resolves automatically from scores.</div>
+                  <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginBottom:10, fontWeight:600}}>{"$"+STAKE_FOURSOME+"/man · open pool — anyone can back a side; the losing side pays the winners, split evenly"}</div>
+                  {COURSES.map(function(c, ri) {
+                    var ms = foursomeMatches.filter(function(m){return m.courseIdx===ri;});
+                    if (ms.length === 0) return null;
+                    return (
+                      <div key={ri} style={{marginBottom:14}}>
+                        <div style={{fontSize:12, fontWeight:700, color:CL.muted, fontFamily:"system-ui", letterSpacing:0.5, marginBottom:6}}>{COURSE_LABELS[ri]+" · "+c.name}</div>
+                        {ms.map(function(m, mi) {
+                          var core = m.pairA.concat(m.pairB);
+                          var roundFinal = roundComplete(scores, ri, core);
+                          var aPts = pairLive(m.pairA, ri), bPts = pairLive(m.pairB, ri);
+                          var decided = roundFinal && aPts !== null && bPts !== null && aPts !== bPts;
+                          var aWin = decided && aPts > bPts, bWin = decided && bPts > aPts;
+                          var bckA = (m.backersA||[]), bckB = (m.backersB||[]);
+                          var sideACount = m.pairA.length + bckA.length, sideBCount = m.pairB.length + bckB.length;
+                          var loseCount = aWin ? sideBCount : sideACount;
+                          var winCount = aWin ? sideACount : sideBCount;
+                          var winEach = decided ? (m.stake * loseCount) / winCount : 0;
+                          var backed = bckA.concat(bckB);
+                          var canBack = players.filter(function(p){ return core.indexOf(p.id)<0 && backed.indexOf(p.id)<0; });
+                          function sideBox(pairIds, bckIds, isWin, color, sideKey) {
+                            return (
+                              <div style={Object.assign({}, S.teamBox, isWin ? S.teamBoxWin : {}, {flex:1})}>
+                                {pairIds.map(function(pid){ return <div key={pid} style={{fontSize:13, color:"#fff", fontFamily:"system-ui"}}>{fName(pid)}</div>; })}
+                                {bckIds.map(function(pid){ return (
+                                  <div key={pid} style={{display:"flex", alignItems:"center", justifyContent:"space-between", fontSize:12, color:CL.muted, fontFamily:"system-ui", marginTop:2}}>
+                                    <span>{fName(pid)+" "}<span style={{fontSize:10}}>(backing)</span></span>
+                                    {!roundFinal && props.canEdit && <button onClick={function(){unback(m.id, pid);}} style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:11, padding:"0 4px"}}>✕</button>}
+                                  </div>
+                                ); })}
+                                <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginTop:6}}>{(sideKey==="a"?(m.pairA.length+bckA.length):(m.pairB.length+bckB.length))+" in · "+(pairLive(pairIds, ri)===null?"–":pairLive(pairIds, ri))+" pts"}</div>
+                              </div>
+                            );
+                          }
+                          return (
+                            <div key={m.id} style={{padding:"10px 0", borderTop:mi>0?"1px solid "+CL.border:"none"}}>
+                              <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginBottom:6}}>{"Match "+(mi+1)}</div>
+                              <div style={{display:"flex", gap:8, alignItems:"stretch"}}>
+                                {sideBox(m.pairA, bckA, aWin, CL.red, "a")}
+                                <div style={{display:"flex", alignItems:"center", color:CL.muted, fontWeight:700, fontFamily:"system-ui", fontSize:13}}>vs</div>
+                                {sideBox(m.pairB, bckB, bWin, CL.blue, "b")}
+                              </div>
+                              {decided ? (
+                                <div style={{textAlign:"center", marginTop:8, fontSize:13, fontWeight:700, color:"#22c55e", fontFamily:"system-ui"}}>{"🏆 "+fName(aWin?m.pairA[0]:m.pairB[0]).split(" ")[1]+" & "+fName(aWin?m.pairA[1]:m.pairB[1]).split(" ")[1]+" win · each winner +$"+(Math.round(winEach*100)/100)}</div>
+                              ) : roundFinal ? (
+                                <div style={{textAlign:"center", marginTop:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>All square — no money moves</div>
+                              ) : (aPts!==null||bPts!==null) ? (
+                                <div style={{textAlign:"center", marginTop:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>{"Live — "+((aPts||0)===(bPts||0)?"all square":((aPts||0)>(bPts||0)?"Side A":"Side B")+" up "+Math.abs((aPts||0)-(bPts||0)))}</div>
+                              ) : (
+                                <div style={{textAlign:"center", marginTop:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>Not started</div>
+                              )}
+                              {!roundFinal && props.canEdit && canBack.length > 0 && (
+                                <div style={{marginTop:8, padding:8, background:"rgba(40,69,112,0.15)", borderRadius:8}}>
+                                  <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", fontWeight:600, marginBottom:6}}>{"BACK A SIDE — $"+m.stake+" in"}</div>
+                                  {canBack.map(function(p){ return (
+                                    <div key={p.id} style={{display:"flex", alignItems:"center", gap:6, marginBottom:5}}>
+                                      <div style={{flex:1, fontSize:13, color:"#fff", fontFamily:"system-ui"}}>{p.emoji+" "+p.name}</div>
+                                      <button onClick={function(){backSide(m.id, p.id, "a");}} style={Object.assign({}, S.pillBtn, {fontSize:11, padding:"4px 10px", borderColor:"rgba(240,69,74,0.5)", color:CL.red})}>→ A</button>
+                                      <button onClick={function(){backSide(m.id, p.id, "b");}} style={Object.assign({}, S.pillBtn, {fontSize:11, padding:"4px 10px", borderColor:"rgba(111,172,255,0.5)", color:CL.blue})}>→ B</button>
+                                    </div>
+                                  ); })}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
           </div>
         );
       })()}
@@ -3558,7 +3753,7 @@ function BetsTab(props) {
         <div>
           <div style={S.card}>
             <div style={S.cardTitle}>⚔️ Head-to-Head Bets</div>
-            <div style={Object.assign({}, S.label, {marginBottom:12})}>Anyone can Jump In on either side — tap to join a bet. Brian & Carl create and settle. Losers pay winners, split evenly.</div>
+            <div style={Object.assign({}, S.label, {marginBottom:12})}>Anyone signed in can create a bet, Jump In on either side, and settle the result. Losers pay winners, split evenly.</div>
 
             {h2hBets.map(function(bet) {
               var sideA = bet.sideA || [bet.bettor];
@@ -3677,7 +3872,7 @@ function BetsTab(props) {
                       <button onClick={function() { settleBet("b"); }} style={Object.assign({}, S.pillBtn, {flex:1, textAlign:"center", padding:"8px 0", borderColor:"rgba(37,99,235,0.4)"})}>Side B wins</button>
                     </div>
                     ) : (
-                    <div style={{marginTop:8, fontSize:11, color:CL.muted, fontFamily:"system-ui", textAlign:"center"}}>Brian or Carl settles the result</div>
+                    <div style={{marginTop:8, fontSize:11, color:CL.muted, fontFamily:"system-ui", textAlign:"center"}}>Sign in as a player to settle the result</div>
                     )
                   )}
                 </div>
@@ -3777,7 +3972,7 @@ function BetsTab(props) {
             <div style={S.cardTitle}>💸 Settle Up</div>
             <div style={Object.assign({}, S.label, {marginBottom:12})}>Who owes who across every bet, game, and expense</div>
             {(function() {
-              var transfers = calculateSettleUp(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible);
+              var transfers = calculateSettleUp(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches);
               if (transfers.length === 0) return (
                 <div style={{textAlign:"center", padding:20, color:CL.muted, fontFamily:"system-ui", fontSize:14}}>
                   Everyone's even — nothing to settle yet.
