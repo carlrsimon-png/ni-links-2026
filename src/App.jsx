@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "3.15";
+const APP_VERSION = "3.16";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
@@ -1306,6 +1306,9 @@ export default function App() {
 
   // Debounced save to Firebase
   var saveTimer = useRef(null);
+  // Accumulates ONLY the fields that changed since the last flush, so the debounced
+  // save writes a minimal payload instead of the whole state (clobber prevention).
+  var pendingSave = useRef({});
   var update = useCallback(function(changes) {
     // Master guard: guests can never write synced data to Firebase.
     var isGuestWrite = guestRef.current;
@@ -1333,35 +1336,36 @@ export default function App() {
     setState(function(prev) {
       var applied = changes;
       var next = Object.assign({}, prev, applied);
-      // Save to Firebase (debounced to avoid hammering Firestore) — never for guests
-      if (!isGuestWrite && (changes.scores || changes.players || changes.games || changes.bets || changes.individualProps || changes.h2hBets || changes.teamMatches || changes.foursomeMatches || changes.drinks || changes.expenses || changes.selectedTees || changes.skinsEligible || changes.courseOverrides)) {
-        clearTimeout(saveTimer.current);
-        setSaveStatus("saving");
-        saveTimer.current = setTimeout(function() {
-          firebaseSave({
-            players: next.players,
-            // NOTE: scores are intentionally NOT written here. They go through
-            // saveScorePath (targeted field-path writes) exclusively, so including
-            // the whole scores map in this debounced full-document save would let a
-            // bet/expense edit clobber another phone's recent score entries.
-            games: next.games,
-            bets: next.bets,
-            individualProps: next.individualProps,
-            h2hBets: next.h2hBets,
-            teamMatches: next.teamMatches,
-            foursomeMatches: next.foursomeMatches,
-            drinks: next.drinks,
-            expenses: next.expenses,
-            selectedTees: next.selectedTees,
-            skinsEligible: next.skinsEligible,
-            courseOverrides: next.courseOverrides,
-          }).then(function() {
-            setSaveStatus("saved");
-            setTimeout(function() { setSaveStatus("idle"); }, 1500);
-          }).catch(function() {
-            setSaveStatus("error");
-          });
-        }, 500);
+      // Save to Firebase — ONLY the fields that actually changed (accumulated across
+      // the debounce window), never the whole state. With merge:true, any field we
+      // omit is left untouched in Firestore, so one phone's edit to bets/expenses/
+      // drinks/etc. can no longer overwrite another phone's H2H Jump In, skins opt-in,
+      // prop opt-in, or any other shared list it didn't touch. This is the general fix
+      // for the same clobber class the foursome backers hit. (Scores go through
+      // saveScorePath; foursome backers through atomic map writes — both excluded here.)
+      if (!isGuestWrite) {
+        var SYNCED_FIELDS = ["players", "games", "bets", "individualProps", "h2hBets", "teamMatches", "foursomeMatches", "drinks", "expenses", "selectedTees", "skinsEligible", "courseOverrides"];
+        var changedToSave = SYNCED_FIELDS.filter(function(f) { return Object.prototype.hasOwnProperty.call(changes, f); });
+        if (changedToSave.length) {
+          changedToSave.forEach(function(f) { pendingSave.current[f] = next[f]; });
+          clearTimeout(saveTimer.current);
+          setSaveStatus("saving");
+          saveTimer.current = setTimeout(function() {
+            var payload = pendingSave.current;
+            pendingSave.current = {};
+            firebaseSave(payload).then(function() {
+              setSaveStatus("saved");
+              setTimeout(function() { setSaveStatus("idle"); }, 1500);
+            }).catch(function() {
+              setSaveStatus("error");
+              // Re-queue failed fields (unless a newer change already superseded them)
+              // so a hard error retries on the next flush instead of silently vanishing.
+              Object.keys(payload).forEach(function(f) {
+                if (!Object.prototype.hasOwnProperty.call(pendingSave.current, f)) pendingSave.current[f] = payload[f];
+              });
+            });
+          }, 500);
+        }
       }
       return next;
     });
