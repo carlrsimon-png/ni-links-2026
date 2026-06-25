@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, doc, setDoc, updateDoc, onSnapshot, collection, addDoc, query, orderBy, limit, deleteDoc } from "firebase/firestore";
+import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, doc, setDoc, updateDoc, onSnapshot, collection, addDoc, query, orderBy, limit, deleteDoc, arrayUnion, arrayRemove } from "firebase/firestore";
 
 // ╔══════════════════════════════════════════════════════╗
 // ║  REPLACE THESE WITH YOUR FIREBASE PROJECT VALUES    ║
@@ -103,6 +103,32 @@ export function saveScorePath(pid, ri, holeArr) {
   return updateDoc(tripRef, encodeNested(payload)).catch(function(err) {
     console.error("Score save failed:", err);
     throw err; // let the caller surface a "not saved" indicator
+  });
+}
+
+// Foursome-match backers use the same targeted, clobber-proof pattern as scores —
+// but go a step further with atomic array transforms. Backers live in their own
+// map (foursomeBackers.<matchId>.{a,b}) NOT inside the foursomeMatches array, so
+// a full-document save can never overwrite them. arrayUnion/arrayRemove apply the
+// change server-side, so two phones backing the SAME match at once both stick
+// (no last-write-wins), and the writes queue durably offline. backSide adds the
+// player to one side and removes them from the other in a single atomic update.
+export function saveFoursomeBack(matchId, pid, side) {
+  var payload = {};
+  payload["foursomeBackers." + matchId + ".a"] = side === "a" ? arrayUnion(pid) : arrayRemove(pid);
+  payload["foursomeBackers." + matchId + ".b"] = side === "b" ? arrayUnion(pid) : arrayRemove(pid);
+  return updateDoc(tripRef, payload).catch(function(err) {
+    console.error("Foursome backer save failed:", err);
+    throw err;
+  });
+}
+export function saveFoursomeUnback(matchId, pid) {
+  var payload = {};
+  payload["foursomeBackers." + matchId + ".a"] = arrayRemove(pid);
+  payload["foursomeBackers." + matchId + ".b"] = arrayRemove(pid);
+  return updateDoc(tripRef, payload).catch(function(err) {
+    console.error("Foursome unback save failed:", err);
+    throw err;
   });
 }
 

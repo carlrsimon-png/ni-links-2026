@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { subscribeToState, saveState as firebaseSave, saveScorePath, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
+import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "3.14";
+const APP_VERSION = "3.15";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
@@ -168,6 +168,22 @@ const DEFAULT_FOURSOME_MATCHES = [
   { id:"fm4b", course:"Portstewart", courseIdx:4, pairA:["p2","p8"], pairB:["p3","p1"], backersA:[], backersB:[], stake:STAKE_FOURSOME },
 ];
 
+// Overlay the live backers (stored in the atomic `foursomeBackers` map, keyed by
+// match id) onto the static pairings. Backers are deliberately NOT kept inside the
+// foursomeMatches array — that array rides the clobber-prone full-document save,
+// whereas the backers map is written only via atomic field-path updates that can't
+// be overwritten. This is the single place that recombines them for UI + settlement.
+function matchesWithBackers(backersMap) {
+  var map = backersMap || {};
+  return DEFAULT_FOURSOME_MATCHES.map(function(m) {
+    var b = map[m.id] || {};
+    return Object.assign({}, m, {
+      backersA: Array.isArray(b.a) ? b.a.slice() : [],
+      backersB: Array.isArray(b.b) ? b.b.slice() : [],
+    });
+  });
+}
+
 const DEFAULT_PLAYERS = [
   { id:"p1", name:"Jeff Andrea", handicap:10.2, emoji:"🔴" },
   { id:"p2", name:"Brian Smith", handicap:12.8, emoji:"🔵" },
@@ -234,6 +250,7 @@ function defaultState() {
     h2hBets: [],
     teamMatches: [],
     foursomeMatches: DEFAULT_FOURSOME_MATCHES.map(function(m) { return Object.assign({}, m, { backersA: m.backersA.slice(), backersB: m.backersB.slice() }); }),
+    foursomeBackers: {},
     drinks: {},
     expenses: [],
     selectedTees: [0, 0, 0, 0, 0],
@@ -1116,21 +1133,32 @@ export default function App() {
         if (!Array.isArray(merged.skinsEligible.net)) merged.skinsEligible.net = [];
         if (!Array.isArray(merged.skinsEligible.course)) merged.skinsEligible.course = [];
         while (merged.skinsEligible.course.length < COURSES.length) merged.skinsEligible.course.push([]);
-        // Seed/sync the foursome Stableford matches. The pairings are fixed in code;
-        // we only carry forward who has BACKED each side (backersA/backersB) from the
-        // saved doc, matched by match id. This keeps the matches present for docs that
-        // predate the feature, and lets the pairings be corrected in code later without
-        // wiping anyone's side bets.
+        // Seed/sync the foursome Stableford matches. The pairings are fixed in code.
+        // Backers now live in a dedicated `foursomeBackers` map ({ matchId: {a,b} })
+        // written atomically — never inside this array — so a full-document save can't
+        // clobber them. We (1) carry the map forward from the saved doc, and (2) one-time
+        // recover any legacy backers that older builds wrote into foursomeMatches[i].
         (function() {
+          var fb = (merged.foursomeBackers && typeof merged.foursomeBackers === "object") ? merged.foursomeBackers : {};
           var savedFM = {};
           (Array.isArray(merged.foursomeMatches) ? merged.foursomeMatches : []).forEach(function(m) {
             if (m && m.id) savedFM[m.id] = m;
           });
+          DEFAULT_FOURSOME_MATCHES.forEach(function(def) {
+            var cur = fb[def.id] || { a: [], b: [] };
+            var a = Array.isArray(cur.a) ? cur.a.slice() : [];
+            var b = Array.isArray(cur.b) ? cur.b.slice() : [];
+            var legacy = savedFM[def.id];
+            if (legacy) { // fold in any backers stranded in the old array shape
+              (Array.isArray(legacy.backersA) ? legacy.backersA : []).forEach(function(id) { if (a.indexOf(id) < 0) a.push(id); });
+              (Array.isArray(legacy.backersB) ? legacy.backersB : []).forEach(function(id) { if (b.indexOf(id) < 0) b.push(id); });
+            }
+            fb[def.id] = { a: a, b: b };
+          });
+          merged.foursomeBackers = fb;
+          // Keep the static pairings present (backers always empty here — the map owns them).
           merged.foursomeMatches = DEFAULT_FOURSOME_MATCHES.map(function(def) {
-            var prev = savedFM[def.id];
-            var bA = (prev && Array.isArray(prev.backersA)) ? prev.backersA.slice() : [];
-            var bB = (prev && Array.isArray(prev.backersB)) ? prev.backersB.slice() : [];
-            return Object.assign({}, def, { backersA: bA, backersB: bB });
+            return Object.assign({}, def, { backersA: [], backersB: [] });
           });
         })();
         merged.players.forEach(function(p) {
@@ -1339,7 +1367,33 @@ export default function App() {
     });
   }, [setSaveStatus, setState]);
 
-  // Clobber-safe score writer. Updates local state immediately for a snappy UI,
+  // Optimistic, LOCAL-ONLY updates to the foursome backers map for an instant UI
+  // response. These never touch the full-document save — the durable write is the
+  // atomic saveFoursomeBack/saveFoursomeUnback call in the component. Reading from
+  // `prev` (not a render-time snapshot) keeps rapid taps from racing each other.
+  var backFoursomeLocal = useCallback(function(matchId, pid, side) {
+    setState(function(prev) {
+      var fb = Object.assign({}, prev.foursomeBackers || {});
+      var cur = fb[matchId] || { a: [], b: [] };
+      var a = (Array.isArray(cur.a) ? cur.a : []).filter(function(id) { return id !== pid; });
+      var b = (Array.isArray(cur.b) ? cur.b : []).filter(function(id) { return id !== pid; });
+      if (side === "a") a.push(pid); else b.push(pid);
+      fb[matchId] = { a: a, b: b };
+      return Object.assign({}, prev, { foursomeBackers: fb });
+    });
+  }, [setState]);
+  var unbackFoursomeLocal = useCallback(function(matchId, pid) {
+    setState(function(prev) {
+      var fb = Object.assign({}, prev.foursomeBackers || {});
+      var cur = fb[matchId] || { a: [], b: [] };
+      fb[matchId] = {
+        a: (Array.isArray(cur.a) ? cur.a : []).filter(function(id) { return id !== pid; }),
+        b: (Array.isArray(cur.b) ? cur.b : []).filter(function(id) { return id !== pid; }),
+      };
+      return Object.assign({}, prev, { foursomeBackers: fb });
+    });
+  }, [setState]);
+
   // then writes ONLY this player's/round's hole array to Firestore (field-path
   // write) instead of the whole scores map — see saveScorePath in firebase.js.
   // Debounced per player+round so rapid hole entry doesn't hammer the network.
@@ -1534,7 +1588,7 @@ export default function App() {
             <div style={{fontSize:14, color:CL.muted, fontFamily:"system-ui", marginBottom:20}}>Sign in with the group passcode to view bets and games.</div>
             <button onClick={handleLogout} style={Object.assign({}, S.primaryBtn, {width:"auto", padding:"12px 32px"})}>Sign In</button>
           </div>
-        ) : <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} foursomeMatches={state.foursomeMatches || DEFAULT_FOURSOME_MATCHES} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} isGuest={isGuest} canEdit={canEditBets} skinsEligible={state.skinsEligible || {gross:[], net:[], course:[[],[],[],[],[]]}} />)}
+        ) : <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} foursomeBackers={state.foursomeBackers || {}} onBack={backFoursomeLocal} onUnback={unbackFoursomeLocal} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} isGuest={isGuest} canEdit={canEditBets} skinsEligible={state.skinsEligible || {gross:[], net:[], course:[[],[],[],[],[]]}} />)}
         {activeTab === "expenses" && (isGuest ? (
           <div style={{padding:"60px 24px", textAlign:"center"}}>
             <div style={{fontSize:48, marginBottom:16}}>🔒</div>
@@ -3019,7 +3073,10 @@ function BetsTab(props) {
   var skinsEligible = useMemo(function() { return props.skinsEligible || { gross: [], net: [], course: [[],[],[],[],[]] }; }, [props.skinsEligible]);
   var expenses = useMemo(function() { return props.expenses || []; }, [props.expenses]);
   var teamMatches = props.teamMatches || DEFAULT_TEAM_MATCHES;
-  var foursomeMatches = useMemo(function() { return props.foursomeMatches || DEFAULT_FOURSOME_MATCHES; }, [props.foursomeMatches]);
+  // Backers come from the atomic foursomeBackers map (clobber-proof). Recombine
+  // with the static pairings here for both settlement and the UI.
+  var foursomeBackers = useMemo(function() { return props.foursomeBackers || {}; }, [props.foursomeBackers]);
+  var foursomeMatches = useMemo(function() { return matchesWithBackers(foursomeBackers); }, [foursomeBackers]);
   var individualProps = props.individualProps || DEFAULT_INDIVIDUAL_PROPS;
   var addingGame = props.addingGame, update = props.update, resetAll = props.resetAll;
 
@@ -3270,26 +3327,20 @@ function BetsTab(props) {
                 });
                 return any ? t : null;
               }
+              // Backers are written ATOMICALLY to their own map (clobber-proof) and
+              // mirrored into local state for an instant UI response. We deliberately
+              // do NOT route this through the full-document save, so a concurrent save
+              // from another phone can never wipe a bet. `props.onBack` performs the
+              // optimistic local update; saveFoursomeBack does the durable atomic write.
               function backSide(matchId, pid, side) {
-                update({foursomeMatches: foursomeMatches.map(function(m) {
-                  if (m.id !== matchId) return m;
-                  var nm = Object.assign({}, m, { backersA:(m.backersA||[]).slice(), backersB:(m.backersB||[]).slice() });
-                  // never on a core pair, never on both sides
-                  if (nm.pairA.indexOf(pid)>=0 || nm.pairB.indexOf(pid)>=0) return nm;
-                  nm.backersA = nm.backersA.filter(function(id){return id!==pid;});
-                  nm.backersB = nm.backersB.filter(function(id){return id!==pid;});
-                  if (side === "a") nm.backersA.push(pid); else nm.backersB.push(pid);
-                  return nm;
-                })});
+                var m = foursomeMatches.find(function(x){ return x.id===matchId; });
+                if (m && (m.pairA.indexOf(pid)>=0 || m.pairB.indexOf(pid)>=0)) return; // core player can't back
+                props.onBack(matchId, pid, side);        // optimistic local state
+                saveFoursomeBack(matchId, pid, side);     // durable atomic write
               }
               function unback(matchId, pid) {
-                update({foursomeMatches: foursomeMatches.map(function(m) {
-                  if (m.id !== matchId) return m;
-                  return Object.assign({}, m, {
-                    backersA:(m.backersA||[]).filter(function(id){return id!==pid;}),
-                    backersB:(m.backersB||[]).filter(function(id){return id!==pid;}),
-                  });
-                })});
+                props.onUnback(matchId, pid);
+                saveFoursomeUnback(matchId, pid);
               }
               return (
                 <div style={S.card}>
