@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "3.20";
+const APP_VERSION = "3.21";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
@@ -492,6 +492,48 @@ function roundComplete(scores, ri, ids) {
   });
 }
 
+// Auto-resolve the winner of a score-determinable prop from the scorecard.
+// Returns the winning player id, or null if it isn't resolvable yet (rounds not
+// complete) OR there's a tie at the top (left for a human to break). Only the
+// seeded props have metrics — custom props always return null (manual). The metric
+// logic mirrors the live-leader display so the two never disagree.
+function autoPropWinner(prop, players, scores) {
+  if (!prop) return null;
+  var eligible = prop.eligible || [];
+  if (eligible.length === 0) return null;
+  var rounds, higherWins, valueFn;
+  if (prop.id === "ip8") {
+    rounds = [0, 1, 2, 3, 4]; higherWins = true;
+    valueFn = function(pid, p) { return getTotalStableford(scores, pid, p.handicap); };
+  } else if (prop.id && prop.id.indexOf("ipsf") === 0) {
+    var ri = parseInt(prop.id.replace("ipsf", ""), 10);
+    rounds = [ri]; higherWins = true;
+    valueFn = function(pid, p) { return getRoundStableford(scores, pid, ri, p.handicap); };
+  } else if (prop.id === "ip1") {
+    rounds = [0, 1, 2, 3, 4]; higherWins = false;
+    valueFn = function(pid, p) {
+      var net = 0, any = false;
+      for (var r = 0; r < COURSES.length; r++) { var ns = getNetRoundScore(scores, pid, r, p.handicap); if (ns !== null) { net += ns; any = true; } }
+      return any ? net : null;
+    };
+  } else {
+    return null; // custom prop — manual only
+  }
+  // Every needed round must be fully posted for every eligible player.
+  var ready = eligible.every(function(pid) { return rounds.every(function(r) { return roundComplete(scores, r, [pid]); }); });
+  if (!ready) return null;
+  var rows = eligible.map(function(pid) {
+    var p = players.find(function(x) { return x.id === pid; });
+    return p ? { pid: pid, v: valueFn(pid, p) } : null;
+  }).filter(function(x) { return x && x.v !== null; });
+  if (rows.length === 0) return null;
+  rows.sort(function(a, b) { return higherWins ? b.v - a.v : a.v - b.v; });
+  var top = rows[0];
+  var tied = rows.filter(function(x) { return x.v === top.v; });
+  if (tied.length > 1) return null; // ambiguous — needs a human
+  return top.pid;
+}
+
 // Score-based money is "final" only when every round is fully posted for the
 // relevant players. Until then the standings (and the dollars they imply) are live.
 function tripComplete(scores, ids) {
@@ -759,20 +801,19 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
     });
   }
 
-  // Individual prop bets (single winner takes the pot; only opted-in players buy in)
+  // Individual prop bets (single winner takes the pot; only opted-in players buy in).
+  // A manually-settled winner always wins; otherwise score-determinable props
+  // (Most Net Stableford / Lowest Net) auto-resolve from the card once rounds are in.
   if (individualProps) {
     individualProps.forEach(function(prop) {
-      if (!prop.settled || !prop.winner) return;
+      var winner = (prop.settled && prop.winner) ? prop.winner : autoPropWinner(prop, players, scores);
+      if (!winner) return;
       var buyin = prop.buyin || DEFAULT_BUYIN;
       var elig = prop.eligible || [];
-      // Defensive: a settled prop should always have its winner among the eligible.
-      // If somehow not, fall back to crediting just the winner with no debits.
-      if (elig.indexOf(prop.winner) < 0) {
-        balances[prop.winner] = (balances[prop.winner] || 0);
-        return;
-      }
+      // Defensive: the winner must be among the eligible. If somehow not, no money moves.
+      if (elig.indexOf(winner) < 0) return;
       elig.forEach(function(pid) {
-        if (pid === prop.winner) balances[pid] = (balances[pid] || 0) + (buyin * (elig.length - 1));
+        if (pid === winner) balances[pid] = (balances[pid] || 0) + (buyin * (elig.length - 1));
         else balances[pid] = (balances[pid] || 0) - buyin;
       });
     });
@@ -3812,14 +3853,18 @@ function BetsTab(props) {
             <div style={S.cardTitle}>🎯 Individual Props</div>
             <div style={Object.assign({}, S.label, {marginBottom:12})}>Tap players to set who's IN each bet. Only selected players are eligible. Winner = best NET among those selected.</div>
             {individualProps.map(function(prop) {
-              var winner = players.find(function(x) { return x.id === prop.winner; });
+              var autoWin = autoPropWinner(prop, players, scores);
+              var effWinner = (prop.settled && prop.winner) ? prop.winner : autoWin;
+              var effSettled = prop.settled || !!autoWin;
+              var isAuto = !!autoWin && !prop.settled;
+              var winner = players.find(function(x) { return x.id === effWinner; });
               var eligible = prop.eligible || [];
               var pot = (prop.buyin || DEFAULT_BUYIN) * eligible.length;
               // Compute the current NET leader among eligible players.
               // Stableford-style props (ip8 / ipsf*) use net Stableford points;
               // everything else uses net total score (lower is better).
               var leader = null;
-              if (!prop.settled && eligible.length > 0) {
+              if (!effSettled && eligible.length > 0) {
                 var rows = null, higherWins = true;
                 if (prop.id === "ip8") {
                   rows = eligible.map(function(pid) { var p = players.find(function(x){return x.id===pid;}); return { p:p, v:getTotalStableford(scores, pid, p.handicap) }; });
@@ -3848,17 +3893,28 @@ function BetsTab(props) {
                 <div key={prop.id} style={Object.assign({padding:"12px 0"}, S.separator)}>
                   <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start"}}>
                     <div style={{flex:1}}>
-                      <div style={{fontSize:15, fontWeight:600, color:prop.settled?CL.muted:"#fff", textDecoration:prop.settled?"line-through":"none"}}>{prop.name}</div>
+                      <div style={{fontSize:15, fontWeight:600, color:effSettled?CL.muted:"#fff", textDecoration:effSettled?"line-through":"none"}}>{prop.name}</div>
                       {prop.desc && <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", marginTop:2}}>{prop.desc}</div>}
                       <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginTop:2}}>{"$"+(prop.buyin||DEFAULT_BUYIN)+"/player · "+eligible.length+" in · $"+pot+" pot"}</div>
                       {leader && <div style={{fontSize:12, color:CL.blue, fontFamily:"system-ui", marginTop:3}}>{leader.tied ? "Tied: "+leader.tiedPlayers.map(function(t){return t.player.name.split(" ")[0];}).join(", ")+" ("+leader.val+(leader.higherWins?" pts)":" net)") : "Leading: "+leader.player.emoji+" "+leader.player.name.split(" ")[0]+" ("+leader.val+(leader.higherWins?" pts)":" net)")}</div>}
                     </div>
-                    {!prop.settled && props.canEdit && <button onClick={function() { if (confirm("Delete this prop?")) update({individualProps:individualProps.filter(function(x) { return x.id!==prop.id; })}); }} style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:14, flexShrink:0}}>🗑</button>}
+                    {!effSettled && props.canEdit && <button onClick={function() { if (confirm("Delete this prop?")) update({individualProps:individualProps.filter(function(x) { return x.id!==prop.id; })}); }} style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:14, flexShrink:0}}>🗑</button>}
                   </div>
-                  {prop.settled ? (
+                  {effSettled ? (
                     <div style={{marginTop:6}}>
-                      <div style={{fontSize:14, color:"#22c55e", fontFamily:"system-ui"}}>{"🏆 "+(winner ? winner.emoji+" "+winner.name+" wins $"+pot : "Winner")}</div>
-                      {props.canEdit && <button onClick={function() { update({individualProps:individualProps.map(function(x) { return x.id===prop.id ? Object.assign({},x,{settled:false,winner:null}) : x; })}); }} style={{marginTop:6, fontSize:11, color:CL.muted, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:6, padding:"5px 12px", cursor:"pointer"}}>↩ Undo</button>}
+                      <div style={{fontSize:14, color:"#22c55e", fontFamily:"system-ui"}}>{"🏆 "+(winner ? winner.emoji+" "+winner.name+" wins $"+pot : "Winner")}{isAuto ? "  ·  auto from scores" : ""}</div>
+                      {prop.settled && props.canEdit && <button onClick={function() { update({individualProps:individualProps.map(function(x) { return x.id===prop.id ? Object.assign({},x,{settled:false,winner:null}) : x; })}); }} style={{marginTop:6, fontSize:11, color:CL.muted, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:6, padding:"5px 12px", cursor:"pointer"}}>↩ Undo</button>}
+                      {isAuto && props.canEdit && (
+                        <div style={{marginTop:8}}>
+                          <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginBottom:4}}>Override (ties / withdrawals):</div>
+                          <div style={{display:"flex", gap:4, flexWrap:"wrap"}}>
+                            {eligible.map(function(pid) {
+                              var p = players.find(function(x){return x.id===pid;});
+                              return <button key={pid} onClick={function() { update({individualProps:individualProps.map(function(x) { return x.id===prop.id ? Object.assign({},x,{settled:true,winner:pid}) : x; })}); }} style={Object.assign({}, S.pillBtn, {fontSize:11, padding:"4px 10px"}, pid===effWinner ? {borderColor:"#22c55e", color:"#22c55e"} : {})}>{p.emoji+" "+p.name.split(" ")[0]}</button>;
+                            })}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <div style={{marginTop:8}}>
@@ -3873,9 +3929,12 @@ function BetsTab(props) {
                           }} style={Object.assign({}, S.pillBtn, isIn ? {background:"rgba(34,197,94,0.2)", borderColor:"#22c55e", color:"#22c55e"} : {opacity:0.6})}>{(isIn?"✓ ":"")+p.emoji+" "+p.name.split(" ")[0]}</button>;
                         })}
                       </div>
+                      {(prop.id === "ip8" || (prop.id && prop.id.indexOf("ipsf")===0) || prop.id === "ip1") && (
+                        <div style={{fontSize:11, color:CL.blue, fontFamily:"system-ui", marginBottom:8}}>⚡ Auto-settles from the scorecard once the round{(prop.id==="ip8"||prop.id==="ip1")?"s are":" is"} complete. A tie is left for you to settle by hand.</div>
+                      )}
                       {props.canEdit && eligible.length > 0 && (
                         <div>
-                          <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginBottom:4}}>Settle — tap the winner:</div>
+                          <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginBottom:4}}>Settle by hand — tap the winner:</div>
                           <div style={{display:"flex", gap:4, flexWrap:"wrap"}}>
                             {eligible.map(function(pid) {
                               var p = players.find(function(x){return x.id===pid;});
