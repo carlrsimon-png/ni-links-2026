@@ -2,11 +2,14 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "3.22";
+const APP_VERSION = "3.24";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
 const AUTH_KEY = "ni-links-auth";
+// Device-local: remembers which tab you were on so a reload (e.g. pull-to-refresh)
+// returns you to it instead of dropping back to Home. Never synced across devices.
+const TAB_KEY = "ni-links-active-tab";
 const GROUP_PIN = "2026";
 // Only these players (Brian Smith, Carl Simon) can edit Bets & Expenses — the "gatekeepers" of the books.
 const BOOKKEEPER_IDS = ["p2", "p6"];
@@ -1183,8 +1186,11 @@ function PlayerSelectScreen(props) {
 
 // ─── APP SHELL ───────────────────────────────────────────────────────
 export default function App() {
-  var st = useState(Object.assign({}, defaultState(), { activeTab:"home", selectedRound:getCurrentRound(), addingGame:false, initialized:false }));
+  var st = useState(Object.assign({}, defaultState(), { activeTab:(function(){ try { return localStorage.getItem(TAB_KEY) || "home"; } catch(e) { return "home"; } })(), selectedRound:getCurrentRound(), addingGame:false, initialized:false }));
   var state = st[0], setState = st[1];
+  // Persist the active tab device-locally so a reload (pull-to-refresh, OS, etc.)
+  // restores it instead of dropping back to Home.
+  useEffect(function() { try { localStorage.setItem(TAB_KEY, state.activeTab); } catch (e) {} }, [state.activeTab]);
   var ld = useState(true); var loading = ld[0], setLoading = ld[1];
   var sh = useState(null); var scoringHole = sh[0], setScoringHole = sh[1];
   var sv = useState("idle"); var saveStatus = sv[0], setSaveStatus = sv[1];
@@ -3294,6 +3300,26 @@ function BetsTab(props) {
       players
     );
   }, [players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches, overUnderProps]);
+
+  // All-bets net EXCLUDING expenses — same engine as Settle Up, expenses zeroed.
+  var betsAll = useMemo(function() {
+    return computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, [], scores, skinsEligible, foursomeMatches, overUnderProps);
+  }, [players, games, bets, h2hBets, teamMatches, individualProps, scores, skinsEligible, foursomeMatches, overUnderProps]);
+
+  // Net for ONE section = (all bets) − (all bets with that section removed). The
+  // always-on score competitions cancel in the subtraction, leaving exactly that
+  // section's contribution. Guarantees these summaries can never disagree with the
+  // real settlement engine. `remove`: "props" | "h2h" | "games".
+  function sectionNet(remove) {
+    var ip = remove === "props" ? [] : individualProps;
+    var ou = remove === "props" ? [] : overUnderProps;
+    var hh = remove === "h2h" ? [] : h2hBets;
+    var gm = remove === "games" ? [] : games;
+    var without = computeBalances(players, gm, bets, hh, teamMatches, ip, [], scores, skinsEligible, foursomeMatches, ou);
+    var out = {};
+    players.forEach(function(p) { out[p.id] = (betsAll[p.id] || 0) - (without[p.id] || 0); });
+    return out;
+  }
   function netMoney(pid) {
     return netBalances[pid] || 0;
   }
@@ -3406,74 +3432,35 @@ function BetsTab(props) {
         {subTabs.map(function(t) { return <button key={t.id} onClick={function() { setTab(t.id); }} style={Object.assign({}, S.subTab, tab===t.id ? S.subTabOn : S.subTabOff)}>{t.label}</button>; })}
       </div>
 
-      {/* Betting summary — net position per player (excludes expenses). Hidden on Stableford tab. */}
-      {tab !== "team" && tab !== "ind" && tab !== "skins" && (
-      <div style={S.card}>
-        <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8}}>
-          <div style={S.cardTitle}>💰 Betting Summary</div>
-        </div>
-        {(function() {
-          // Calculate net betting position per player (NO expenses — those are on Spend tab)
-          function betNet(pid) {
-            var total = games.reduce(function(t,g) { return t+((g.results && g.results[pid])||0); }, 0);
-            var matchupP = TEAM_MATCHUPS[0];
-            bets.forEach(function(b) {
-              if (!b.settled || !b.winner || !b.buyin) return;
-              var winIds = [];
-              if (b.winner === "teamA") winIds = resolveTeam(matchupP.teamA, players);
-              else if (b.winner === "teamB") winIds = resolveTeam(matchupP.teamB, players);
-              else winIds = [b.winner];
-              if (winIds.length === 0) return;
-              var loseCount = players.length - winIds.length;
-              if (winIds.indexOf(pid) >= 0) total += (b.buyin * loseCount) / winIds.length;
-              else total -= b.buyin;
-            });
-            individualProps.forEach(function(prop) {
-              if (!prop.settled || !prop.winner) return;
-              var buyin = prop.buyin || DEFAULT_BUYIN;
-              if (pid === prop.winner) total += buyin * (players.length - 1);
-              else total -= buyin;
-            });
-            h2hBets.forEach(function(b) {
-              if (!b.settled) return;
-              var sA = b.sideA || [b.bettor];
-              var sB = b.sideB || [b.opponent];
-              var winSide = b.winningSide === "a" ? sA : sB;
-              var loseSide = b.winningSide === "a" ? sB : sA;
-              if (winSide.length === 0) return;
-              var loseTotal = loseSide.length * b.stake;
-              var winEach = loseTotal / winSide.length;
-              if (loseSide.indexOf(pid) >= 0) total -= b.stake;
-              if (winSide.indexOf(pid) >= 0) total += winEach;
-            });
-            var myTeamIds = resolveTeam(TEAM_MATCHUPS[0].teamA, players);
-            var isTeamA = myTeamIds.indexOf(pid) >= 0;
-            teamMatches.forEach(function(m) {
-              if (!m.settled || !m.winner) return;
-              var won = (m.winner === "a" && isTeamA) || (m.winner === "b" && !isTeamA);
-              total += won ? m.stake : -m.stake;
-            });
-            return total;
-          }
-          var anySettled = bets.some(function(b){return b.settled;}) || individualProps.some(function(p){return p.settled;}) || h2hBets.some(function(b){return b.settled;}) || teamMatches.some(function(m){return m.settled;}) || games.length > 0;
-          if (!anySettled) return <div style={{fontSize:14, color:CL.muted, fontFamily:"system-ui", textAlign:"center", padding:8}}>No settled bets yet. Positions update as bets are settled.</div>;
-          // Compute each player's net once, then sort — avoids recomputing betNet in the sort comparator.
-          var sorted = players.map(function(p) { return { p:p, net:betNet(p.id) }; }).sort(function(a,b) { return b.net - a.net; });
-          return sorted.map(function(row, i) {
-            var p = row.p, net = row.net;
-            var color = net > 0.01 ? "#22c55e" : net < -0.01 ? CL.red : CL.muted;
-            return (
-              <div key={p.id} style={Object.assign({display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 0"}, i < sorted.length-1 ? S.separator : {})}>
-                <div style={{fontSize:15, color:"#fff", fontFamily:"system-ui"}}>{p.emoji+" "+p.name}</div>
-                <div style={{textAlign:"right"}}>
-                  <div style={{fontSize:16, fontWeight:700, color:color, fontFamily:"system-ui"}}>{(net >= 0 ? "+$" : "-$")+Math.abs(net).toFixed(2)}</div>
+      {/* Section-scoped net summary — Props/H2H/Games show only that section; Settle
+          shows all bets. Every figure comes from the same engine as Settle Up. */}
+      {(tab === "props" || tab === "h2h" || tab === "games" || tab === "settle") && (function() {
+        var map = tab === "settle" ? betsAll : sectionNet(tab === "props" ? "props" : tab === "h2h" ? "h2h" : "games");
+        var title = tab === "props" ? "🎯 Props — Net" : tab === "h2h" ? "🤝 Head-to-Head — Net" : tab === "games" ? "🎲 Games — Net" : "💰 All Bets — Net";
+        var sub = tab === "settle" ? "Across every bet (excludes shared expenses — see transfers below)" : "This section only · live from the scorecard where applicable";
+        var sorted = players.map(function(p) { return { p:p, net: map[p.id] || 0 }; }).sort(function(a,b) { return b.net - a.net; });
+        var anyMoney = sorted.some(function(r) { return Math.abs(r.net) > 0.005; });
+        return (
+          <div style={S.card}>
+            <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:2}}>
+              <div style={S.cardTitle}>{title}</div>
+            </div>
+            <div style={Object.assign({}, S.label, {marginBottom:8})}>{sub}</div>
+            {!anyMoney ? (
+              <div style={{fontSize:14, color:CL.muted, fontFamily:"system-ui", textAlign:"center", padding:8}}>Nothing settled here yet. Updates as results come in.</div>
+            ) : sorted.map(function(row, i) {
+              var p = row.p, net = row.net;
+              var color = net > 0.005 ? "#22c55e" : net < -0.005 ? CL.red : CL.muted;
+              return (
+                <div key={p.id} style={Object.assign({display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 0"}, i < sorted.length-1 ? S.separator : {})}>
+                  <div style={{fontSize:15, color:"#fff", fontFamily:"system-ui"}}>{p.emoji+" "+p.name}</div>
+                  <div style={{fontSize:16, fontWeight:700, color:color, fontFamily:"system-ui"}}>{net > -0.005 && net < 0.005 ? "Even" : (net >= 0 ? "+$" : "-$")+Math.abs(net).toFixed(2)}</div>
                 </div>
-              </div>
-            );
-          });
-        })()}
-      </div>
-      )}
+              );
+            })}
+          </div>
+        );
+      })()}
 
       {tab === "team" && (function() {
         var matchup = TEAM_MATCHUPS[0];
@@ -3682,7 +3669,7 @@ function BetsTab(props) {
         }
         function renderBracket(label, emoji, ids) {
           var rows = bracketRows(ids);
-          var pot = ids.length * 50;
+          var pot = ids.length * STAKE_GROSS;
           var played = rows.filter(function(r) { return r.pts !== null; });
           var leaderPts = played.length ? played[0].pts : null;
           return (
@@ -4426,12 +4413,6 @@ function BetsTab(props) {
               )}
             </div>
           )}
-          <div style={S.card}>
-            <div style={S.cardTitle}>💸 Money List</div>
-            {players.map(function(p) { return Object.assign({},p,{net:netMoney(p.id)}); }).sort(function(a,b) { return b.net-a.net; }).map(function(p) {
-              return <div key={p.id} style={Object.assign({display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 0", fontSize:15, color:"#fff"}, S.separator)}><span>{p.emoji+" "+p.name}</span><span style={{fontWeight:700, fontSize:16, fontFamily:"system-ui", color:p.net>0?"#22c55e":p.net<0?"#ef4444":"#888"}}>{(p.net>0?"+":"")+(p.net===0?"Even":"$"+p.net)}</span></div>;
-            })}
-          </div>
           {games.length > 0 && (
             <div style={S.card}>
               <div style={S.cardTitle}>Game Log</div>
