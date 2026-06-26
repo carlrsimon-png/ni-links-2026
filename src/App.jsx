@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "3.16";
+const APP_VERSION = "3.17";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
@@ -1175,7 +1175,19 @@ export default function App() {
         delete merged.selectedRound;
         delete merged.addingGame;
         delete merged.initialized;
-        setState(function(prev) { return Object.assign({}, prev, merged, { initialized:true }); });
+        setState(function(prev) {
+          var nextState = Object.assign({}, prev, merged, { initialized: true });
+          // Don't let an incoming snapshot (e.g. another phone entering a score) clobber
+          // a field that still has an unsaved local edit in flight. Without this, an
+          // in-progress skins/props/H2H selection reverts mid-edit — and because the
+          // next tap then reads the reverted list and the debounced save coalesces to
+          // it, rapidly-made picks get dropped ("selection won't save"). Any field
+          // sitting in pendingSave keeps its local value until our own save flushes it.
+          Object.keys(pendingSave.current).forEach(function(f) {
+            if (Object.prototype.hasOwnProperty.call(prev, f)) nextState[f] = prev[f];
+          });
+          return nextState;
+        });
       } else if (!hasLoadedData.current) {
         // First time only — seed Firestore with defaults.
         // Guarded so a transient offline/null callback can never wipe live data.
