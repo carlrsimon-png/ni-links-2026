@@ -2,9 +2,15 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, savePropEligible, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "3.25";
+const APP_VERSION = "3.26";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
+// Skins and Individual Gross Stableford were removed to simplify the bet menu.
+// These flags gate BOTH the settlement math and the UI in one place — set either
+// back to true to fully restore that bet (no data was deleted: skinsEligible opt-ins
+// remain saved in the document, so turning skins back on brings every opt-in back).
+var SHOW_SKINS = false;
+var SHOW_GROSS = false;
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
 const AUTH_KEY = "ni-links-auth";
 // Device-local: remembers which tab you were on so a reload (e.g. pull-to-refresh)
@@ -880,7 +886,7 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
   // Individual Gross Stableford — two handicap brackets, winner-take-all
   // ($50/man). Every player in a bracket buys in; the bracket's gross-Stableford
   // leader collects the pot. A tie at the top is left unresolved (no money yet).
-  if (scores) {
+  if (SHOW_GROSS && scores) {
     var GS_STAKE = STAKE_GROSS;
     var gsBrackets = getGrossBrackets(players);
     [gsBrackets.a, gsBrackets.b].forEach(function(ids) {
@@ -902,7 +908,7 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
 
   // Skins — five independent per-course games. Net scoring, $20/skin, opt-in per course.
   // A skin pays its winner $20 from every other eligible player in that course's game.
-  if (scores && skinsEligible && skinsEligible.course) {
+  if (SHOW_SKINS && scores && skinsEligible && skinsEligible.course) {
     var SK_STAKE = STAKE_SKIN;
     COURSES.forEach(function(c, ri) {
       var skElig = (skinsEligible.course[ri]) || [];
@@ -923,7 +929,7 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
 
   // Overall trip-total skins — gross and net, one combined pot each ($20/skin), opt-in.
   // Independent of the per-course games above; a player can be in either, both, or neither.
-  if (scores && skinsEligible) {
+  if (SHOW_SKINS && scores && skinsEligible) {
     [{ type: "gross", useNet: false }, { type: "net", useNet: true }].forEach(function(cfg) {
       var elig = skinsEligible[cfg.type] || [];
       if (elig.length < 2) return;
@@ -3403,7 +3409,7 @@ function BetsTab(props) {
     setPName(""); setPHcp(""); setPEmoji("🔴"); setEditId(null);
   }
 
-  var subTabs = [{id:"team",label:"🏆 Team"},{id:"ind",label:"⛳ Ind"},{id:"skins",label:"🔪 Skins"},{id:"props",label:"🎯 Props"},{id:"h2h",label:"🤝 H2H"},{id:"games",label:"Games"},{id:"settle",label:"💸 Settle"},{id:"drinks",label:"🍺"}];
+  var subTabs = [{id:"team",label:"🏆 Team"},{id:"ind",label:"⛳ Ind"},{id:"skins",label:"🔪 Skins"},{id:"props",label:"🎯 Props"},{id:"h2h",label:"🤝 H2H"},{id:"games",label:"Games"},{id:"settle",label:"💸 Settle"},{id:"drinks",label:"🍺"}].filter(function(t){ return (t.id!=="skins"||SHOW_SKINS) && (t.id!=="ind"||SHOW_GROSS); });
   var rulesUI = useState(false); var rulesOpen = rulesUI[0], setRulesOpen = rulesUI[1];
 
   return (
@@ -3440,10 +3446,10 @@ function BetsTab(props) {
               <div style={{marginTop:4}}>
                 {H("🤖 AUTOMATIC — YOU'RE ALREADY IN, SCORED BY THE APP")}
                 {Row("Team Stableford", "$100/man", "Public ("+pub+") vs Private ("+priv+"). Net Stableford over all 5 rounds — the winning four each collect $100.")}
-                {Row("Gross Brackets", "$50/man, winner-take-all", "Gross Stableford for the whole trip, split by handicap.  ⛰️ The Mournes: "+mournes+".  🌊 The Causeway: "+causeway+".")}
+                {SHOW_GROSS && Row("Gross Brackets", "$50/man, winner-take-all", "Gross Stableford for the whole trip, split by handicap.  ⛰️ The Mournes: "+mournes+".  🌊 The Causeway: "+causeway+".")}
                 {Row("Foursome Matches", "$"+STAKE_FOURSOME+"/man", "Two 2-v-2 matches each course — your pair's combined net Stableford vs the other pair. You're auto-entered in your own match every round.")}
                 {H("✋ OPT IN — TAP TO JOIN (in the tabs above)")}
-                {Row("Skins", "$"+STAKE_SKIN+"/skin, net", "Five per-course games plus trip-long gross & net pots. Join whichever you want on the 🔪 Skins tab.")}
+                {SHOW_SKINS && Row("Skins", "$"+STAKE_SKIN+"/skin, net", "Five per-course games plus trip-long gross & net pots. Join whichever you want on the 🔪 Skins tab.")}
                 {Row("Individual Props", "$"+DEFAULT_BUYIN+" each, winner-take-all", "Most Net Stableford (whole trip + each of the 5 courses) and Lowest Net Score (trip). Pick your spots on the 🎯 Props tab.")}
                 {Row("Back a Foursome", "$"+STAKE_FOURSOME, "Want action on the other group's match? Tap a side on the 🏆 Team tab — anyone can.")}
                 {H("💬 ANYTIME")}
@@ -3683,7 +3689,7 @@ function BetsTab(props) {
         );
       })()}
 
-      {tab === "ind" && (function() {
+      {SHOW_GROSS && tab === "ind" && (function() {
         var brackets = getGrossBrackets(players);
         function bracketRows(ids) {
           return ids.map(function(pid) {
@@ -3731,7 +3737,7 @@ function BetsTab(props) {
         );
       })()}
 
-      {tab === "skins" && (
+      {SHOW_SKINS && tab === "skins" && (
         <div>
           {/* Skins opt-in and results */}
           {(function() {
