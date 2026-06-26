@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "3.17";
+const APP_VERSION = "3.19";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
@@ -132,6 +132,15 @@ const DEFAULT_INDIVIDUAL_PROPS = [
   { id:"ip1", name:"Lowest Net Score (Trip)", desc:"Best net total across all 5 rounds", settled:false, winner:null, buyin:25, eligible:[] },
 ];
 
+// Over/Under props — two-sided side bets on a numeric line (e.g. trip eagle count
+// O/U 1.5). Players take the "over" or the "under" and the losing side pays the
+// winning side, split evenly (same conserving math as Head-to-Head). Settled
+// manually once the real figure is known. Seeded with one example; more can be
+// added in-app.
+const DEFAULT_OU_PROPS = [
+  { id:"ou_eagles", name:"Eagles (trip total)", line:1.5, stake:20, over:[], under:[], settled:false, result:null },
+];
+
 const DEFAULT_TEAM_MATCHES = [
   { id:"m1", course:"Ardglass", courseIdx:0, teamA:null, teamB:null, settled:false, winner:null, stake:20 },
   { id:"m2", course:"Royal County Down", courseIdx:1, teamA:null, teamB:null, settled:false, winner:null, stake:20 },
@@ -246,6 +255,7 @@ function defaultState() {
     games: [],
     bets: DEFAULT_PROPS,
     individualProps: DEFAULT_INDIVIDUAL_PROPS,
+    overUnderProps: DEFAULT_OU_PROPS.map(function(p) { return Object.assign({}, p, { over: [], under: [] }); }),
     customBets: [],
     h2hBets: [],
     teamMatches: [],
@@ -574,7 +584,7 @@ function getTripDay() {
 
 // Compute each player's net money balance across every bet, game, and expense.
 // Single source of truth — used by both the Settle Up transfers and Net Balances.
-function computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches) {
+function computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches, overUnderProps) {
   var balances = {};
   players.forEach(function(p) { balances[p.id] = 0; });
 
@@ -700,6 +710,26 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
         if (pid === prop.winner) balances[pid] = (balances[pid] || 0) + (buyin * (elig.length - 1));
         else balances[pid] = (balances[pid] || 0) - buyin;
       });
+    });
+  }
+
+  // Over/Under props — two-sided. Players take "over" or "under" on a line; once the
+  // real figure is known the bet is settled to a result and the LOSING side pays the
+  // WINNING side, split evenly (same conserving math as Head-to-Head). A side with no
+  // takers makes the bet void (no counterparty) — no money moves.
+  if (overUnderProps) {
+    overUnderProps.forEach(function(p) {
+      if (!p.settled || !p.result) return;
+      var over = p.over || [], under = p.under || [];
+      var winSide = p.result === "over" ? over : under;
+      // Disjoint the sides defensively (a player should never be on both).
+      var loseSide = (p.result === "over" ? under : over).filter(function(pid) { return winSide.indexOf(pid) < 0; });
+      if (winSide.length === 0 || loseSide.length === 0) return; // void — needs both sides
+      var stake = p.stake || DEFAULT_BUYIN;
+      var loseTotal = loseSide.length * stake;
+      var winEach = loseTotal / winSide.length;
+      loseSide.forEach(function(pid) { balances[pid] = (balances[pid] || 0) - stake; });
+      winSide.forEach(function(pid) { balances[pid] = (balances[pid] || 0) + winEach; });
     });
   }
 
@@ -832,8 +862,8 @@ function roundBalances(balances, players) {
 }
 
 // Greedy min-cash-flow: turn net balances into a short list of who-pays-whom.
-function calculateSettleUp(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches) {
-  var raw = computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches);
+function calculateSettleUp(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches, overUnderProps) {
+  var raw = computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches, overUnderProps);
   var balances = roundBalances(raw, players); // whole-dollar, still sums to $0
   var creditors = [];
   var debtors = [];
@@ -1133,6 +1163,11 @@ export default function App() {
         if (!Array.isArray(merged.skinsEligible.net)) merged.skinsEligible.net = [];
         if (!Array.isArray(merged.skinsEligible.course)) merged.skinsEligible.course = [];
         while (merged.skinsEligible.course.length < COURSES.length) merged.skinsEligible.course.push([]);
+        // Over/Under props: ensure it's always an array; normalize each side to an array.
+        if (!Array.isArray(merged.overUnderProps)) merged.overUnderProps = DEFAULT_OU_PROPS.map(function(p) { return Object.assign({}, p, { over: [], under: [] }); });
+        merged.overUnderProps = merged.overUnderProps.map(function(p) {
+          return Object.assign({}, p, { over: Array.isArray(p.over) ? p.over : [], under: Array.isArray(p.under) ? p.under : [] });
+        });
         // Seed/sync the foursome Stableford matches. The pairings are fixed in code.
         // Backers now live in a dedicated `foursomeBackers` map ({ matchId: {a,b} })
         // written atomically — never inside this array — so a full-document save can't
@@ -1338,7 +1373,7 @@ export default function App() {
       if (stripped && Object.keys(changes).length === 0) return; // nothing left to apply
     } else if (!canEditBooksRef.current) {
       // Guests: strip everything
-      var bookFields2 = ["games", "bets", "individualProps", "h2hBets", "teamMatches", "foursomeMatches", "drinks", "expenses", "customBets", "skinsEligible", "courseOverrides"];
+      var bookFields2 = ["games", "bets", "individualProps", "overUnderProps", "h2hBets", "teamMatches", "foursomeMatches", "drinks", "expenses", "customBets", "skinsEligible", "courseOverrides"];
       var stripped2 = false;
       bookFields2.forEach(function(f) {
         if (Object.prototype.hasOwnProperty.call(changes, f)) { delete changes[f]; stripped2 = true; }
@@ -1356,7 +1391,7 @@ export default function App() {
       // for the same clobber class the foursome backers hit. (Scores go through
       // saveScorePath; foursome backers through atomic map writes — both excluded here.)
       if (!isGuestWrite) {
-        var SYNCED_FIELDS = ["players", "games", "bets", "individualProps", "h2hBets", "teamMatches", "foursomeMatches", "drinks", "expenses", "selectedTees", "skinsEligible", "courseOverrides"];
+        var SYNCED_FIELDS = ["players", "games", "bets", "individualProps", "overUnderProps", "h2hBets", "teamMatches", "foursomeMatches", "drinks", "expenses", "selectedTees", "skinsEligible", "courseOverrides"];
         var changedToSave = SYNCED_FIELDS.filter(function(f) { return Object.prototype.hasOwnProperty.call(changes, f); });
         if (changedToSave.length) {
           changedToSave.forEach(function(f) { pendingSave.current[f] = next[f]; });
@@ -1604,7 +1639,7 @@ export default function App() {
             <div style={{fontSize:14, color:CL.muted, fontFamily:"system-ui", marginBottom:20}}>Sign in with the group passcode to view bets and games.</div>
             <button onClick={handleLogout} style={Object.assign({}, S.primaryBtn, {width:"auto", padding:"12px 32px"})}>Sign In</button>
           </div>
-        ) : <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} foursomeBackers={state.foursomeBackers || {}} onBack={backFoursomeLocal} onUnback={unbackFoursomeLocal} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} isGuest={isGuest} canEdit={canEditBets} skinsEligible={state.skinsEligible || {gross:[], net:[], course:[[],[],[],[],[]]}} />)}
+        ) : <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} overUnderProps={state.overUnderProps || DEFAULT_OU_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} foursomeBackers={state.foursomeBackers || {}} onBack={backFoursomeLocal} onUnback={unbackFoursomeLocal} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} isGuest={isGuest} canEdit={canEditBets} skinsEligible={state.skinsEligible || {gross:[], net:[], course:[[],[],[],[],[]]}} />)}
         {activeTab === "expenses" && (isGuest ? (
           <div style={{padding:"60px 24px", textAlign:"center"}}>
             <div style={{fontSize:48, marginBottom:16}}>🔒</div>
@@ -3093,6 +3128,7 @@ function BetsTab(props) {
   // with the static pairings here for both settlement and the UI.
   var foursomeBackers = useMemo(function() { return props.foursomeBackers || {}; }, [props.foursomeBackers]);
   var foursomeMatches = useMemo(function() { return matchesWithBackers(foursomeBackers); }, [foursomeBackers]);
+  var overUnderProps = useMemo(function() { return props.overUnderProps || DEFAULT_OU_PROPS; }, [props.overUnderProps]);
   var individualProps = props.individualProps || DEFAULT_INDIVIDUAL_PROPS;
   var addingGame = props.addingGame, update = props.update, resetAll = props.resetAll;
 
@@ -3115,6 +3151,10 @@ function BetsTab(props) {
   var cpName = useState(""); var customPropName = cpName[0], setCustomPropName = cpName[1];
   var cpBuyin = useState("25"); var customPropBuyin = cpBuyin[0], setCustomPropBuyin = cpBuyin[1];
   var cpAdding = useState(false); var addingProp = cpAdding[0], setAddingProp = cpAdding[1];
+  var ouNm = useState(""); var ouName = ouNm[0], setOuName = ouNm[1];
+  var ouLn = useState(""); var ouLine = ouLn[0], setOuLine = ouLn[1];
+  var ouSt = useState("20"); var ouStake = ouSt[0], setOuStake = ouSt[1];
+  var ouAdd = useState(false); var addingOu = ouAdd[0], setAddingOu = ouAdd[1];
   // Player management
   var pns = useState(""); var pName = pns[0], setPName = pns[1];
   var phs = useState(""); var pHcp = phs[0], setPHcp = phs[1];
@@ -3127,10 +3167,10 @@ function BetsTab(props) {
   // per player on every render (the Bets tab renders this for all 8 players).
   var netBalances = useMemo(function() {
     return roundBalances(
-      computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches),
+      computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches, overUnderProps),
       players
     );
-  }, [players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches]);
+  }, [players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches, overUnderProps]);
   function netMoney(pid) {
     return netBalances[pid] || 0;
   }
@@ -3182,11 +3222,57 @@ function BetsTab(props) {
   }
 
   var subTabs = [{id:"team",label:"🏆 Team"},{id:"ind",label:"⛳ Ind"},{id:"skins",label:"🔪 Skins"},{id:"props",label:"🎯 Props"},{id:"h2h",label:"🤝 H2H"},{id:"games",label:"Games"},{id:"settle",label:"💸 Settle"},{id:"drinks",label:"🍺"}];
+  var rulesUI = useState(false); var rulesOpen = rulesUI[0], setRulesOpen = rulesUI[1];
 
   return (
     <div>
       <div style={S.pageHeader}><div style={S.pageTitle}>Bets & Games</div></div>
       {props.isGuest && <div style={{margin:"0 16px 8px", padding:"8px 12px", background:"rgba(111,172,255,0.1)", border:"1px solid "+CL.border, borderRadius:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>👁️ You're viewing as a guest. Sign in as a player to place and settle bets.</div>}
+
+      {/* Collapsible "How the Bets Work" reference card — teams & brackets pulled live
+          so it stays accurate if a handicap is edited. Collapsed by default. */}
+      {(function() {
+        var firstName = function(id) { var p = players.find(function(x){ return x.id===id; }); return p ? p.name.split(" ")[0] : id; };
+        var tm = TEAM_MATCHUPS[0];
+        var pub = (tm.teamA.names || []).map(function(n){ return n.split(" ")[0]; }).join(", ");
+        var priv = (tm.teamB.names || []).map(function(n){ return n.split(" ")[0]; }).join(", ");
+        var br = getGrossBrackets(players);
+        var mournes = (br.a || []).map(firstName).join(", ");
+        var causeway = (br.b || []).map(firstName).join(", ");
+        var H = function(txt) { return <div style={{fontSize:11, fontWeight:700, letterSpacing:0.5, color:CL.muted, fontFamily:"system-ui", margin:"12px 0 6px"}}>{txt}</div>; };
+        var Row = function(title, stake, detail) {
+          return (
+            <div style={{marginBottom:9}}>
+              <div style={{fontSize:13.5, color:"#fff", fontFamily:"system-ui"}}><span style={{fontWeight:700}}>{title}</span><span style={{color:CL.red, fontWeight:700}}>{stake ? "  ·  "+stake : ""}</span></div>
+              <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", marginTop:1, lineHeight:1.35}}>{detail}</div>
+            </div>
+          );
+        };
+        return (
+          <div style={Object.assign({}, S.card, {marginBottom:8})}>
+            <div onClick={function(){ setRulesOpen(!rulesOpen); }} style={{display:"flex", justifyContent:"space-between", alignItems:"center", cursor:"pointer"}}>
+              <div style={S.cardTitle}>📖 How the Bets Work</div>
+              <div style={{color:CL.muted, fontSize:13, fontFamily:"system-ui"}}>{rulesOpen ? "Hide ▾" : "Tap to read ▸"}</div>
+            </div>
+            {rulesOpen && (
+              <div style={{marginTop:4}}>
+                {H("🤖 AUTOMATIC — YOU'RE ALREADY IN, SCORED BY THE APP")}
+                {Row("Team Stableford", "$100/man", "Public ("+pub+") vs Private ("+priv+"). Net Stableford over all 5 rounds — the winning four each collect $100.")}
+                {Row("Gross Brackets", "$50/man, winner-take-all", "Gross Stableford for the whole trip, split by handicap.  ⛰️ The Mournes: "+mournes+".  🌊 The Causeway: "+causeway+".")}
+                {Row("Foursome Matches", "$"+STAKE_FOURSOME+"/man", "Two 2-v-2 matches each course — your pair's combined net Stableford vs the other pair. You're auto-entered in your own match every round.")}
+                {H("✋ OPT IN — TAP TO JOIN (in the tabs above)")}
+                {Row("Skins", "$"+STAKE_SKIN+"/skin, net", "Five per-course games plus trip-long gross & net pots. Join whichever you want on the 🔪 Skins tab.")}
+                {Row("Individual Props", "$"+DEFAULT_BUYIN+" each, winner-take-all", "Most Net Stableford (whole trip + each of the 5 courses) and Lowest Net Score (trip). Pick your spots on the 🎯 Props tab.")}
+                {Row("Back a Foursome", "$"+STAKE_FOURSOME, "Want action on the other group's match? Tap a side on the 🏆 Team tab — anyone can.")}
+                {H("💬 ANYTIME")}
+                {Row("Head-to-Head", "any stake", "Make a side bet with anyone on the 🤝 H2H tab. Create it and others can jump in. Losers pay winners, split evenly.")}
+                <div style={{marginTop:12, padding:"8px 10px", background:"rgba(34,197,94,0.08)", border:"1px solid "+CL.border, borderRadius:8, fontSize:12, color:CL.muted, fontFamily:"system-ui", lineHeight:1.4}}>💰 Everything settles automatically and always balances to zero. Check the 💸 Settle tab anytime to see who owes who.</div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       <div style={{display:"flex", gap:4, padding:"0 16px", marginBottom:8}}>
         {subTabs.map(function(t) { return <button key={t.id} onClick={function() { setTab(t.id); }} style={Object.assign({}, S.subTab, tab===t.id ? S.subTabOn : S.subTabOff)}>{t.label}</button>; })}
       </div>
@@ -3750,6 +3836,130 @@ function BetsTab(props) {
               </div>
             ))}
           </div>
+
+          {/* Over/Under Props — two-sided side bets on a numeric line */}
+          <div style={S.card}>
+            <div style={S.cardTitle}>🎲 Over / Under Props</div>
+            <div style={Object.assign({}, S.label, {marginBottom:12})}>Two-sided bets on a number. Take the OVER or the UNDER — once it's settled, the losing side pays the winners, split evenly.</div>
+            {(function() {
+              function firstName(id){ var pl=players.find(function(x){return x.id===id;}); return pl?pl.emoji+" "+pl.name.split(" ")[0]:id; }
+              function takeSide(propId, pid, side){
+                update({overUnderProps: overUnderProps.map(function(p){
+                  if(p.id!==propId) return p;
+                  var np=Object.assign({},p,{over:(p.over||[]).slice(),under:(p.under||[]).slice()});
+                  np.over=np.over.filter(function(id){return id!==pid;});
+                  np.under=np.under.filter(function(id){return id!==pid;});
+                  if(side==="over")np.over.push(pid); else np.under.push(pid);
+                  return np;
+                })});
+              }
+              function leaveOU(propId, pid){
+                update({overUnderProps: overUnderProps.map(function(p){
+                  if(p.id!==propId) return p;
+                  return Object.assign({},p,{over:(p.over||[]).filter(function(id){return id!==pid;}),under:(p.under||[]).filter(function(id){return id!==pid;})});
+                })});
+              }
+              function settleOU(propId, result){ update({overUnderProps: overUnderProps.map(function(p){ return p.id===propId?Object.assign({},p,{settled:true,result:result}):p; })}); }
+              function unsettleOU(propId){ update({overUnderProps: overUnderProps.map(function(p){ return p.id===propId?Object.assign({},p,{settled:false,result:null}):p; })}); }
+              return overUnderProps.map(function(p){
+                var over=p.over||[], under=p.under||[];
+                var inAny=over.concat(under);
+                var undecided=players.filter(function(pl){return inAny.indexOf(pl.id)<0;});
+                var stake=p.stake||DEFAULT_BUYIN;
+                var winSide = p.result==="over"?over:under;
+                var loseSide = (p.result==="over"?under:over).filter(function(id){return winSide.indexOf(id)<0;});
+                var voidBet = winSide.length===0||loseSide.length===0;
+                var winEach = (!voidBet)?(loseSide.length*stake)/winSide.length:0;
+                function sideBox(label, ids, color){
+                  return (
+                    <div style={Object.assign({},S.teamBox,{flex:1})}>
+                      <div style={{fontSize:12,fontWeight:700,color:color,fontFamily:"system-ui",marginBottom:4}}>{label+" ("+ids.length+")"}</div>
+                      {ids.length===0 && <div style={{fontSize:12,color:CL.muted,fontFamily:"system-ui"}}>—</div>}
+                      {ids.map(function(id){ return (
+                        <div key={id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:13,color:"#fff",fontFamily:"system-ui",marginBottom:2}}>
+                          <span>{firstName(id)}</span>
+                          {!p.settled && props.canEdit && <button onClick={function(){leaveOU(p.id,id);}} style={{background:"none",border:"none",color:CL.muted,cursor:"pointer",fontSize:11}}>✕</button>}
+                        </div>
+                      ); })}
+                    </div>
+                  );
+                }
+                return (
+                  <div key={p.id} style={Object.assign({padding:"12px 0"},S.separator)}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                      <div style={{flex:1}}>
+                        <div style={{fontSize:15,fontWeight:600,color:p.settled?CL.muted:"#fff",textDecoration:p.settled?"line-through":"none"}}>{p.name}</div>
+                        <div style={{fontSize:13,color:CL.blue,fontFamily:"system-ui",marginTop:2}}>{"Line: O / U "+p.line+"  ·  $"+stake+"/player"}</div>
+                      </div>
+                      {!p.settled && props.canEdit && <button onClick={function(){ if(confirm("Delete this over/under?")) update({overUnderProps:overUnderProps.filter(function(x){return x.id!==p.id;})}); }} style={{background:"none",border:"none",color:CL.muted,cursor:"pointer",fontSize:14,flexShrink:0}}>🗑</button>}
+                    </div>
+                    <div style={{display:"flex",gap:8,marginTop:8}}>
+                      {sideBox("OVER "+p.line, over, "#22c55e")}
+                      {sideBox("UNDER "+p.line, under, CL.red)}
+                    </div>
+                    {p.settled ? (
+                      <div style={{marginTop:8}}>
+                        <div style={{fontSize:14,color:voidBet?CL.muted:"#22c55e",fontFamily:"system-ui"}}>{voidBet ? ("Settled "+(p.result==="over"?"OVER":"UNDER")+" — void (one side had no takers, no money moves)") : ("🏆 "+(p.result==="over"?"OVER":"UNDER")+" hit — each winner +$"+(Math.round(winEach*100)/100))}</div>
+                        {props.canEdit && <button onClick={function(){unsettleOU(p.id);}} style={{marginTop:6,fontSize:11,color:CL.muted,fontFamily:"system-ui",background:"none",border:"1px solid "+CL.border,borderRadius:6,padding:"5px 12px",cursor:"pointer"}}>↩ Undo</button>}
+                      </div>
+                    ) : (
+                      <div style={{marginTop:8}}>
+                        {props.canEdit && undecided.length>0 && (
+                          <div style={{marginBottom:8}}>
+                            <div style={{fontSize:11,color:CL.muted,fontFamily:"system-ui",marginBottom:4}}>Take a side:</div>
+                            {undecided.map(function(pl){ return (
+                              <div key={pl.id} style={{display:"flex",alignItems:"center",gap:6,marginBottom:5}}>
+                                <div style={{flex:1,fontSize:13,color:"#fff",fontFamily:"system-ui"}}>{pl.emoji+" "+pl.name}</div>
+                                <button onClick={function(){takeSide(p.id,pl.id,"over");}} style={Object.assign({},S.pillBtn,{fontSize:11,padding:"4px 10px",borderColor:"rgba(34,197,94,0.5)",color:"#22c55e"})}>Over</button>
+                                <button onClick={function(){takeSide(p.id,pl.id,"under");}} style={Object.assign({},S.pillBtn,{fontSize:11,padding:"4px 10px",borderColor:"rgba(240,69,74,0.5)",color:CL.red})}>Under</button>
+                              </div>
+                            ); })}
+                          </div>
+                        )}
+                        {props.canEdit && (over.length>0||under.length>0) && (
+                          <div>
+                            <div style={{fontSize:11,color:CL.muted,fontFamily:"system-ui",marginBottom:4}}>Settle — which way did it go?</div>
+                            <div style={{display:"flex",gap:6}}>
+                              <button onClick={function(){settleOU(p.id,"over");}} style={Object.assign({},S.pillBtn,{borderColor:"rgba(34,197,94,0.5)",color:"#22c55e"})}>OVER hit</button>
+                              <button onClick={function(){settleOU(p.id,"under");}} style={Object.assign({},S.pillBtn,{borderColor:"rgba(240,69,74,0.5)",color:CL.red})}>UNDER hit</button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              });
+            })()}
+            {props.canEdit && (!addingOu ? (
+              <button onClick={function(){setAddingOu(true);}} style={Object.assign({},S.addBtn,{width:"100%",marginTop:12,fontSize:13})}>+ Add Over/Under Prop</button>
+            ) : (
+              <div style={{marginTop:12,padding:12,background:"rgba(40,69,112,0.15)",borderRadius:8}}>
+                <div style={{fontSize:13,fontWeight:700,color:"#fff",fontFamily:"system-ui",marginBottom:8}}>New Over/Under</div>
+                <div style={Object.assign({},S.label,{marginBottom:4})}>What's the bet?</div>
+                <input style={S.input} value={ouName} onChange={function(e){setOuName(e.target.value);}} placeholder="e.g. Eagles (trip total)"/>
+                <div style={{display:"flex",gap:8}}>
+                  <div style={{flex:1}}>
+                    <div style={Object.assign({},S.label,{marginBottom:4})}>Line</div>
+                    <input style={S.input} value={ouLine} onChange={function(e){setOuLine(e.target.value);}} type="number" placeholder="1.5"/>
+                  </div>
+                  <div style={{flex:1}}>
+                    <div style={Object.assign({},S.label,{marginBottom:4})}>Stake/player ($)</div>
+                    <input style={S.input} value={ouStake} onChange={function(e){setOuStake(e.target.value);}} type="number" placeholder="20"/>
+                  </div>
+                </div>
+                <div style={{display:"flex",gap:8,marginTop:8}}>
+                  <button style={Object.assign({},S.primaryBtn,{flex:1,opacity:(!ouName.trim()||ouLine==="")?0.5:1})} onClick={function(){
+                    if(!ouName.trim()||ouLine==="") return;
+                    var newOu={id:"ou"+Date.now(),name:ouName.trim(),line:parseFloat(ouLine),stake:parseFloat(ouStake)||20,over:[],under:[],settled:false,result:null};
+                    update({overUnderProps:overUnderProps.concat([newOu])});
+                    setOuName(""); setOuLine(""); setOuStake("20"); setAddingOu(false);
+                  }}>Create</button>
+                  <button style={Object.assign({},S.secondaryBtn,{flex:1})} onClick={function(){setAddingOu(false);setOuName("");setOuLine("");}}>Cancel</button>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -4039,7 +4249,7 @@ function BetsTab(props) {
             <div style={S.cardTitle}>💸 Settle Up</div>
             <div style={Object.assign({}, S.label, {marginBottom:12})}>Who owes who across every bet, game, and expense</div>
             {(function() {
-              var transfers = calculateSettleUp(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches);
+              var transfers = calculateSettleUp(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches, overUnderProps);
               if (transfers.length === 0) return (
                 <div style={{textAlign:"center", padding:20, color:CL.muted, fontFamily:"system-ui", fontSize:14}}>
                   Everyone's even — nothing to settle yet.
