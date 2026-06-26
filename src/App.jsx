@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "3.21";
+const APP_VERSION = "3.22";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
@@ -788,16 +788,28 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
       }
       var bckA = cleanBackers(m.backersA, m.backersB);
       var bckB = cleanBackers(m.backersB, m.backersA);
-      var sideA = pairA.concat(bckA);
-      var sideB = pairB.concat(bckB);
       var stake = m.stake || STAKE_FOURSOME;
-      var winSide = aPts > bPts ? sideA : sideB;
-      var loseSide = aPts > bPts ? sideB : sideA;
-      if (winSide.length === 0) return;
-      var loseTotal = loseSide.length * stake;
-      var winEach = loseTotal / winSide.length;
-      loseSide.forEach(function(pid) { balances[pid] = (balances[pid] || 0) - stake; });
-      winSide.forEach(function(pid) { balances[pid] = (balances[pid] || 0) + winEach; });
+      var winCore = aPts > bPts ? pairA : pairB;
+      var loseCore = aPts > bPts ? pairB : pairA;
+      // 1) The foursome match itself — the four core players only. Losers each pay
+      //    `stake`, split evenly among the winners (2-v-2 → ±$stake each).
+      if (winCore.length > 0 && loseCore.length > 0) {
+        var coreLoseTotal = loseCore.length * stake;
+        var coreWinEach = coreLoseTotal / winCore.length;
+        loseCore.forEach(function(pid) { balances[pid] = (balances[pid] || 0) - stake; });
+        winCore.forEach(function(pid) { balances[pid] = (balances[pid] || 0) + coreWinEach; });
+      }
+      // 2) Backer side bet — a SEPARATE $stake pool among the outside backers only.
+      //    The match result decides the side; losing-side backers pay, winning-side
+      //    backers split. One-sided (no backers opposing) = void, no money moves.
+      var winBck = aPts > bPts ? bckA : bckB;
+      var loseBck = aPts > bPts ? bckB : bckA;
+      if (winBck.length > 0 && loseBck.length > 0) {
+        var bckLoseTotal = loseBck.length * stake;
+        var bckWinEach = bckLoseTotal / winBck.length;
+        loseBck.forEach(function(pid) { balances[pid] = (balances[pid] || 0) - stake; });
+        winBck.forEach(function(pid) { balances[pid] = (balances[pid] || 0) + bckWinEach; });
+      }
     });
   }
 
@@ -3578,37 +3590,41 @@ function BetsTab(props) {
                           var aPts = pairLive(m.pairA, ri), bPts = pairLive(m.pairB, ri);
                           var decided = roundFinal && aPts !== null && bPts !== null && aPts !== bPts;
                           var aWin = decided && aPts > bPts, bWin = decided && bPts > aPts;
-                          var bckA = (m.backersA||[]), bckB = (m.backersB||[]);
-                          var sideACount = m.pairA.length + bckA.length, sideBCount = m.pairB.length + bckB.length;
-                          var loseCount = aWin ? sideBCount : sideACount;
-                          var winCount = aWin ? sideACount : sideBCount;
-                          var winEach = decided ? (m.stake * loseCount) / winCount : 0;
+                          var bckA = (m.backersA||[]).filter(function(id){ return core.indexOf(id)<0 && (m.backersB||[]).indexOf(id)<0; });
+                          var bckB = (m.backersB||[]).filter(function(id){ return core.indexOf(id)<0 && (m.backersA||[]).indexOf(id)<0; });
+                          var winCore = aWin ? m.pairA : m.pairB, loseCore = aWin ? m.pairB : m.pairA;
+                          var coreWinEach = decided && winCore.length>0 ? (m.stake * loseCore.length) / winCore.length : 0;
+                          var winBck = aWin ? bckA : bckB, loseBck = aWin ? bckB : bckA;
+                          var bckVoid = decided && (bckA.length===0 || bckB.length===0);
+                          var bckWinEach = decided && winBck.length>0 && loseBck.length>0 ? (m.stake * loseBck.length) / winBck.length : 0;
                           var backed = bckA.concat(bckB);
                           var canBack = players.filter(function(p){ return core.indexOf(p.id)<0 && backed.indexOf(p.id)<0; });
-                          function sideBox(pairIds, bckIds, isWin, color, sideKey) {
+                          function sideBox(pairIds, isWin) {
                             return (
                               <div style={Object.assign({}, S.teamBox, isWin ? S.teamBoxWin : {}, {flex:1})}>
                                 {pairIds.map(function(pid){ return <div key={pid} style={{fontSize:13, color:"#fff", fontFamily:"system-ui"}}>{fName(pid)}</div>; })}
-                                {bckIds.map(function(pid){ return (
-                                  <div key={pid} style={{display:"flex", alignItems:"center", justifyContent:"space-between", fontSize:12, color:CL.muted, fontFamily:"system-ui", marginTop:2}}>
-                                    <span>{fName(pid)+" "}<span style={{fontSize:10}}>(backing)</span></span>
-                                    {!roundFinal && props.canEdit && <button onClick={function(){unback(m.id, pid);}} style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:11, padding:"0 4px"}}>✕</button>}
-                                  </div>
-                                ); })}
-                                <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginTop:6}}>{(sideKey==="a"?(m.pairA.length+bckA.length):(m.pairB.length+bckB.length))+" in · "+(pairLive(pairIds, ri)===null?"–":pairLive(pairIds, ri))+" pts"}</div>
+                                <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginTop:6}}>{pairIds.length+" in · "+(pairLive(pairIds, ri)===null?"–":pairLive(pairIds, ri))+" pts"}</div>
                               </div>
+                            );
+                          }
+                          function bckChip(pid, color, label) {
+                            return (
+                              <span key={pid} style={{display:"inline-flex", alignItems:"center", gap:4, fontSize:12, color:"#fff", fontFamily:"system-ui", background:"rgba(255,255,255,0.06)", borderRadius:6, padding:"3px 8px", marginRight:6, marginBottom:4}}>
+                                <span style={{color:color, fontWeight:700}}>{label}</span><span>{fName(pid)}</span>
+                                {!roundFinal && props.canEdit && <button onClick={function(){unback(m.id, pid);}} style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:11, padding:0}}>✕</button>}
+                              </span>
                             );
                           }
                           return (
                             <div key={m.id} style={{padding:"10px 0", borderTop:mi>0?"1px solid "+CL.border:"none"}}>
                               <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginBottom:6}}>{"Match "+(mi+1)}</div>
                               <div style={{display:"flex", gap:8, alignItems:"stretch"}}>
-                                {sideBox(m.pairA, bckA, aWin, CL.red, "a")}
+                                {sideBox(m.pairA, aWin)}
                                 <div style={{display:"flex", alignItems:"center", color:CL.muted, fontWeight:700, fontFamily:"system-ui", fontSize:13}}>vs</div>
-                                {sideBox(m.pairB, bckB, bWin, CL.blue, "b")}
+                                {sideBox(m.pairB, bWin)}
                               </div>
                               {decided ? (
-                                <div style={{textAlign:"center", marginTop:8, fontSize:13, fontWeight:700, color:"#22c55e", fontFamily:"system-ui"}}>{"🏆 "+fName(aWin?m.pairA[0]:m.pairB[0]).split(" ")[1]+" & "+fName(aWin?m.pairA[1]:m.pairB[1]).split(" ")[1]+" win · each winner +$"+(Math.round(winEach*100)/100)}</div>
+                                <div style={{textAlign:"center", marginTop:8, fontSize:13, fontWeight:700, color:"#22c55e", fontFamily:"system-ui"}}>{"🏆 "+fName(aWin?m.pairA[0]:m.pairB[0]).split(" ")[1]+" & "+fName(aWin?m.pairA[1]:m.pairB[1]).split(" ")[1]+" win · each winner +$"+(Math.round(coreWinEach*100)/100)}</div>
                               ) : roundFinal ? (
                                 <div style={{textAlign:"center", marginTop:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>All square — no money moves</div>
                               ) : (aPts!==null||bPts!==null) ? (
@@ -3616,18 +3632,30 @@ function BetsTab(props) {
                               ) : (
                                 <div style={{textAlign:"center", marginTop:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>Not started</div>
                               )}
-                              {!roundFinal && props.canEdit && canBack.length > 0 && (
-                                <div style={{marginTop:8, padding:8, background:"rgba(40,69,112,0.15)", borderRadius:8}}>
-                                  <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", fontWeight:600, marginBottom:6}}>{"BACK A SIDE — $"+m.stake+" in"}</div>
-                                  {canBack.map(function(p){ return (
-                                    <div key={p.id} style={{display:"flex", alignItems:"center", gap:6, marginBottom:5}}>
-                                      <div style={{flex:1, fontSize:13, color:"#fff", fontFamily:"system-ui"}}>{p.emoji+" "+p.name}</div>
-                                      <button onClick={function(){backSide(m.id, p.id, "a");}} style={Object.assign({}, S.pillBtn, {fontSize:11, padding:"4px 10px", borderColor:"rgba(240,69,74,0.5)", color:CL.red})}>→ A</button>
-                                      <button onClick={function(){backSide(m.id, p.id, "b");}} style={Object.assign({}, S.pillBtn, {fontSize:11, padding:"4px 10px", borderColor:"rgba(111,172,255,0.5)", color:CL.blue})}>→ B</button>
-                                    </div>
-                                  ); })}
-                                </div>
-                              )}
+
+                              {/* Backer action is its OWN $stake pool, settled among the backers only —
+                                  completely separate from the four-man match above. */}
+                              <div style={{marginTop:10, padding:8, background:"rgba(40,69,112,0.15)", borderRadius:8}}>
+                                <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", fontWeight:600, marginBottom:6}}>{"💸 SIDE BET · back a side — $"+m.stake+" (separate from the match)"}</div>
+                                {backed.length>0 && (
+                                  <div style={{marginBottom:6}}>
+                                    {bckA.map(function(pid){ return bckChip(pid, CL.red, "A"); })}
+                                    {bckB.map(function(pid){ return bckChip(pid, CL.blue, "B"); })}
+                                  </div>
+                                )}
+                                {decided && backed.length>0 ? (
+                                  <div style={{fontSize:12, fontFamily:"system-ui", color:bckVoid?CL.muted:"#22c55e", marginBottom:6}}>{bckVoid ? "Void — only one side was backed, no money moves" : ((aWin?"A":"B")+"-side backers win · +$"+(Math.round(bckWinEach*100)/100)+" each · losing backers −$"+m.stake)}</div>
+                                ) : (!roundFinal && backed.length===0 && (
+                                  <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", marginBottom:6}}>No side bets yet — backers play their own pool.</div>
+                                ))}
+                                {!roundFinal && props.canEdit && canBack.length > 0 && canBack.map(function(p){ return (
+                                  <div key={p.id} style={{display:"flex", alignItems:"center", gap:6, marginBottom:5}}>
+                                    <div style={{flex:1, fontSize:13, color:"#fff", fontFamily:"system-ui"}}>{p.emoji+" "+p.name}</div>
+                                    <button onClick={function(){backSide(m.id, p.id, "a");}} style={Object.assign({}, S.pillBtn, {fontSize:11, padding:"4px 10px", borderColor:"rgba(240,69,74,0.5)", color:CL.red})}>→ A</button>
+                                    <button onClick={function(){backSide(m.id, p.id, "b");}} style={Object.assign({}, S.pillBtn, {fontSize:11, padding:"4px 10px", borderColor:"rgba(111,172,255,0.5)", color:CL.blue})}>→ B</button>
+                                  </div>
+                                ); })}
+                              </div>
                             </div>
                           );
                         })}
