@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
+import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, savePropEligible, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "3.24";
+const APP_VERSION = "3.25";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
@@ -1273,6 +1273,18 @@ export default function App() {
         }
         merged.bets = syncProps(DEFAULT_PROPS, merged.bets);
         merged.individualProps = syncProps(DEFAULT_INDIVIDUAL_PROPS, merged.individualProps);
+        // Prop opt-ins ("who's in") now live in a dedicated propEligible map
+        // ({ propId: [pids] }) written atomically — never inside the individualProps
+        // array — so a stale full-array save can't blank them (same fix as the
+        // foursome backers). The map is the source of truth: overlay it onto each
+        // prop's `eligible` for the rest of the app (settlement + display) to read.
+        (function() {
+          var pe = (merged.propEligible && typeof merged.propEligible === "object" && !Array.isArray(merged.propEligible)) ? merged.propEligible : {};
+          merged.individualProps = merged.individualProps.map(function(p) {
+            return Array.isArray(pe[p.id]) ? Object.assign({}, p, { eligible: pe[p.id] }) : p;
+          });
+          merged.propEligible = pe;
+        })();
         // Update active slopes based on selected tees
         var st = merged.selectedTees || [0,0,0,0,0];
         COURSES.forEach(function(c, i) {
@@ -1568,6 +1580,21 @@ export default function App() {
       return Object.assign({}, prev, { foursomeBackers: fb });
     });
   }, [setState]);
+  // Prop opt-ins use the same clobber-proof approach as the backers: optimistic local
+  // update to the propEligible map (and mirrored onto the prop's `eligible` for instant
+  // display), with the durable atomic arrayUnion/arrayRemove done by savePropEligible
+  // in the component. Never routes through the full-document save, so a concurrent
+  // save from another phone can no longer blank the opt-ins.
+  var togglePropEligibleLocal = useCallback(function(propId, pid, isIn) {
+    setState(function(prev) {
+      var pe = Object.assign({}, prev.propEligible || {});
+      var cur = (Array.isArray(pe[propId]) ? pe[propId] : []).filter(function(id) { return id !== pid; });
+      if (isIn) cur.push(pid);
+      pe[propId] = cur;
+      var nip = (prev.individualProps || []).map(function(x) { return x.id === propId ? Object.assign({}, x, { eligible: cur }) : x; });
+      return Object.assign({}, prev, { propEligible: pe, individualProps: nip });
+    });
+  }, [setState]);
 
   // then writes ONLY this player's/round's hole array to Firestore (field-path
   // write) instead of the whole scores map — see saveScorePath in firebase.js.
@@ -1763,7 +1790,7 @@ export default function App() {
             <div style={{fontSize:14, color:CL.muted, fontFamily:"system-ui", marginBottom:20}}>Sign in with the group passcode to view bets and games.</div>
             <button onClick={handleLogout} style={Object.assign({}, S.primaryBtn, {width:"auto", padding:"12px 32px"})}>Sign In</button>
           </div>
-        ) : <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} overUnderProps={state.overUnderProps || DEFAULT_OU_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} foursomeBackers={state.foursomeBackers || {}} onBack={backFoursomeLocal} onUnback={unbackFoursomeLocal} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} isGuest={isGuest} canEdit={canEditBets} skinsEligible={state.skinsEligible || {gross:[], net:[], course:[[],[],[],[],[]]}} />)}
+        ) : <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} overUnderProps={state.overUnderProps || DEFAULT_OU_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} foursomeBackers={state.foursomeBackers || {}} onBack={backFoursomeLocal} onUnback={unbackFoursomeLocal} onTogglePropElig={togglePropEligibleLocal} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} isGuest={isGuest} canEdit={canEditBets} skinsEligible={state.skinsEligible || {gross:[], net:[], course:[[],[],[],[],[]]}} />)}
         {activeTab === "expenses" && (isGuest ? (
           <div style={{padding:"60px 24px", textAlign:"center"}}>
             <div style={{fontSize:48, marginBottom:16}}>🔒</div>
@@ -3939,8 +3966,12 @@ function BetsTab(props) {
                         {players.map(function(p) {
                           var isIn = eligible.indexOf(p.id) >= 0;
                           return <button key={p.id} onClick={function() {
-                            var ne = isIn ? eligible.filter(function(id){return id!==p.id;}) : eligible.concat([p.id]);
-                            update({individualProps:individualProps.map(function(x) { return x.id===prop.id ? Object.assign({},x,{eligible:ne}) : x; })});
+                            if (!props.canEdit) return; // guests can't edit bets (matches the old guarded path)
+                            // Atomic, clobber-proof opt-in (mirrors the foursome backers):
+                            // optimistic local update + a durable arrayUnion/arrayRemove to
+                            // the propEligible map, so a stale phone can never blank the list.
+                            props.onTogglePropElig(prop.id, p.id, !isIn); // optimistic local state
+                            savePropEligible(prop.id, p.id, !isIn);       // durable atomic write
                           }} style={Object.assign({}, S.pillBtn, isIn ? {background:"rgba(34,197,94,0.2)", borderColor:"#22c55e", color:"#22c55e"} : {opacity:0.6})}>{(isIn?"✓ ":"")+p.emoji+" "+p.name.split(" ")[0]}</button>;
                         })}
                       </div>

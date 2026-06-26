@@ -132,6 +132,22 @@ export function saveFoursomeUnback(matchId, pid) {
   });
 }
 
+// Individual-prop opt-ins ("who's in") use the same atomic, clobber-proof pattern
+// as the foursome backers. Each prop's eligible list lives in its own map entry
+// (propEligible.<propId>) and is changed with arrayUnion/arrayRemove server-side —
+// NEVER by rewriting the whole individualProps array. So two phones opting different
+// players in at once both stick (no last-write-wins), and a stale phone doing an
+// individualProps save can no longer blank everyone's opt-ins. (This was the one
+// remaining list still exposed to the array-clobber that cost us the opt-ins once.)
+export function savePropEligible(propId, pid, isIn) {
+  var payload = {};
+  payload["propEligible." + propId] = isIn ? arrayUnion(pid) : arrayRemove(pid);
+  return updateDoc(tripRef, payload).catch(function(err) {
+    console.error("Prop eligible save failed:", err);
+    throw err;
+  });
+}
+
 // ─── Chat messages (real-time collection) ────────────────
 const chatRef = collection(db, "trips", TRIP_ID, "chat");
 
