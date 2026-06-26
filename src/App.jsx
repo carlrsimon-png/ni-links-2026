@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "3.19";
+const APP_VERSION = "3.20";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 const TRIP_DATE = "2026-06-26T18:00:00-04:00";
@@ -388,6 +388,65 @@ function stablefordPointsForHole(gross, par, courseHcp, holeSI) {
   return 0;
 }
 
+// Net match-play Nassau — three bets in one: front 9, back 9, full 18.
+// Each hole is won by the side with the lower NET ball (best net of its players for
+// 2-v-2; the single player's net for 1-v-1). Net strokes are taken off the LOW player
+// in the match (standard match-play convention) and allocated by stroke index.
+// Whoever wins more holes in a segment wins that segment's value. A segment only
+// settles once every one of its holes is posted for all players; a halved segment
+// moves no money. Losers each pay the value, split evenly among winners — so it
+// conserves to $0 for any side sizes. Returns { results:{pid:$}, segments:{front,back,total} }.
+function nassauResult(g, players, scores) {
+  var ri = (g.round != null ? g.round : 0);
+  var course = COURSES[ri];
+  var sideA = g.sideA || [], sideB = g.sideB || [];
+  var all = sideA.concat(sideB);
+  var empty = { results: {}, segments: { front: null, back: null, total: null }, sideA: sideA, sideB: sideB, courseIdx: ri };
+  if (!course || !course.si || sideA.length === 0 || sideB.length === 0) return empty;
+  var si = course.si;
+  var ch = {};
+  all.forEach(function(pid) { var p = players.find(function(x){ return x.id === pid; }); ch[pid] = p ? getCourseHandicap(p.handicap, ri) : 0; });
+  var minCH = Math.min.apply(null, all.map(function(pid){ return ch[pid]; }));
+  function netHole(pid, h) {
+    var row = scores[pid] && scores[pid][ri];
+    var sc = row ? row[h] : null;
+    if (sc === null || sc === undefined || sc === 0) return null;
+    return sc - strokesOnHole(ch[pid] - minCH, si[h]);
+  }
+  function sideNet(side, h) {
+    var best = null;
+    side.forEach(function(pid) { var n = netHole(pid, h); if (n !== null && (best === null || n < best)) best = n; });
+    return best;
+  }
+  function segment(start, end) {
+    var aWon = 0, bWon = 0, complete = true;
+    for (var h = start; h < end; h++) {
+      var an = sideNet(sideA, h), bn = sideNet(sideB, h);
+      if (an === null || bn === null) { complete = false; continue; }
+      if (an < bn) aWon++; else if (bn < an) bWon++;
+    }
+    return { aWon: aWon, bWon: bWon, complete: complete };
+  }
+  var res = {};
+  all.forEach(function(pid) { res[pid] = 0; });
+  function applySeg(seg, val) {
+    if (!val || !seg.complete || seg.aWon === seg.bWon) { seg.winner = null; seg.val = val; return seg; }
+    var winners = seg.aWon > seg.bWon ? sideA : sideB;
+    var losers = seg.aWon > seg.bWon ? sideB : sideA;
+    var each = (losers.length * val) / winners.length;
+    losers.forEach(function(pid) { res[pid] -= val; });
+    winners.forEach(function(pid) { res[pid] += each; });
+    seg.winner = seg.aWon > seg.bWon ? "a" : "b";
+    seg.val = val;
+    seg.winEach = each;
+    return seg;
+  }
+  var front = applySeg(segment(0, 9), g.frontVal != null ? g.frontVal : 10);
+  var back = applySeg(segment(9, 18), g.backVal != null ? g.backVal : 10);
+  var total = applySeg(segment(0, 18), g.totalVal != null ? g.totalVal : 20);
+  return { results: res, segments: { front: front, back: back, total: total }, sideA: sideA, sideB: sideB, courseIdx: ri };
+}
+
 // Total Stableford points for a player on one round
 function getRoundStableford(scores, pid, ri, handicap) {
   var h = scores[pid] && scores[pid][ri];
@@ -590,6 +649,12 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
 
   // Side games
   games.forEach(function(g) {
+    if (g.type === "nassau") {
+      // Auto-computed net match-play Nassau (front/back/total). Live from scores.
+      var nr = nassauResult(g, players, scores);
+      players.forEach(function(p) { balances[p.id] = (balances[p.id] || 0) + (nr.results[p.id] || 0); });
+      return;
+    }
     if (!g.results) return;
     players.forEach(function(p) {
       balances[p.id] = (balances[p.id] || 0) + (g.results[p.id] || 0);
@@ -3142,6 +3207,11 @@ function BetsTab(props) {
   var sks = useState("5"); var stake = sks[0], setStake = sks[1];
   var rds = useState(0); var round = rds[0], setRound = rds[1];
   var res = useState({}); var results = res[0], setResults = res[1];
+  var nsAst = useState([]); var nsA = nsAst[0], setNsA = nsAst[1];
+  var nsBst = useState([]); var nsB = nsBst[0], setNsB = nsBst[1];
+  var nsFst = useState("10"); var nsFront = nsFst[0], setNsFront = nsFst[1];
+  var nsBkst = useState("10"); var nsBack = nsBkst[0], setNsBack = nsBkst[1];
+  var nsTst = useState("20"); var nsTotal = nsTst[0], setNsTotal = nsTst[1];
   // H2H bet creation
   var h2hDesc = useState(""); var h2hText = h2hDesc[0], setH2hText = h2hDesc[1];
   var h2hStake = useState(""); var h2hAmt = h2hStake[0], setH2hAmt = h2hStake[1];
@@ -3191,6 +3261,12 @@ function BetsTab(props) {
   }
 
   function addGame() {
+    if (gameType === "nassau") {
+      if (nsA.length === 0 || nsB.length === 0) return;
+      update({games:games.concat([{id:Date.now().toString(), type:"nassau", round:round, sideA:nsA.slice(), sideB:nsB.slice(), frontVal:parseFloat(nsFront)||0, backVal:parseFloat(nsBack)||0, totalVal:parseFloat(nsTotal)||0, ts:new Date().toISOString()}]), addingGame:false});
+      setNsA([]); setNsB([]); setNsFront("10"); setNsBack("10"); setNsTotal("20");
+      return;
+    }
     update({games:games.concat([{id:Date.now().toString(), type:gameType, stake:parseFloat(stake)||0, round:round, results:Object.assign({},results), ts:new Date().toISOString()}]), addingGame:false});
     setResults({});
   }
@@ -4215,13 +4291,52 @@ function BetsTab(props) {
               <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:12}}>
                 {GAME_TYPES.map(function(gt) { return <button key={gt.id} onClick={function() { setGameType(gt.id); }} style={Object.assign({display:"flex", alignItems:"center", gap:8, padding:10, borderRadius:6, fontSize:13, fontFamily:"system-ui", cursor:"pointer", color:"#fff"}, gameType===gt.id ? S.subTabOn : S.subTabOff)}><span>{gt.icon}</span><span>{gt.name}</span></button>; })}
               </div>
-              <div style={{display:"flex", gap:8}}>
-                <select style={Object.assign({}, S.input, {flex:1})} value={round} onChange={function(e) { setRound(parseInt(e.target.value)); }}>{COURSES.map(function(c,i) { return <option key={i} value={i}>{"R"+(i+1)+": "+c.name}</option>; })}</select>
-                <input style={Object.assign({}, S.input, {width:80})} type="number" value={stake} onChange={function(e) { setStake(e.target.value); }} placeholder="$"/>
-              </div>
-              <div style={Object.assign({}, S.cardTitle, {marginTop:8})}>Results (+ won / - lost)</div>
-              {players.map(function(p) { return <div key={p.id} style={{display:"flex", justifyContent:"space-between", alignItems:"center", padding:"6px 0", fontSize:14, color:"#fff"}}><span>{p.emoji+" "+p.name}</span><input style={Object.assign({}, S.input, {width:80, margin:0})} type="number" value={results[p.id]||""} onChange={function(e) { var r = Object.assign({},results); r[p.id] = parseFloat(e.target.value)||0; setResults(r); }} placeholder="$0"/></div>; })}
-              <button style={S.primaryBtn} onClick={addGame}>Save Game</button>
+              <select style={Object.assign({}, S.input, {width:"100%"})} value={round} onChange={function(e) { setRound(parseInt(e.target.value)); }}>{COURSES.map(function(c,i) { return <option key={i} value={i}>{"R"+(i+1)+": "+c.name}</option>; })}</select>
+              {gameType === "nassau" ? (function() {
+                function assign(pid, side) {
+                  var inA = nsA.indexOf(pid) >= 0, inB = nsB.indexOf(pid) >= 0;
+                  if (side === "a") {
+                    if (inA) { setNsA(nsA.filter(function(x){return x!==pid;})); return; }
+                    if (nsA.length >= 2) return;
+                    if (inB) setNsB(nsB.filter(function(x){return x!==pid;}));
+                    setNsA(nsA.concat([pid]));
+                  } else {
+                    if (inB) { setNsB(nsB.filter(function(x){return x!==pid;})); return; }
+                    if (nsB.length >= 2) return;
+                    if (inA) setNsA(nsA.filter(function(x){return x!==pid;}));
+                    setNsB(nsB.concat([pid]));
+                  }
+                }
+                return (
+                  <div>
+                    <div style={Object.assign({}, S.label, {marginTop:10, marginBottom:6})}>Net match play · 1-v-1 or 2-v-2 · pick up to 2 per side</div>
+                    {players.map(function(p) {
+                      var inA = nsA.indexOf(p.id) >= 0, inB = nsB.indexOf(p.id) >= 0;
+                      return (
+                        <div key={p.id} style={{display:"flex", alignItems:"center", gap:6, marginBottom:5}}>
+                          <div style={{flex:1, fontSize:13, color:"#fff", fontFamily:"system-ui"}}>{p.emoji+" "+p.name}</div>
+                          <button onClick={function(){ assign(p.id, "a"); }} style={Object.assign({}, S.pillBtn, {fontSize:12, padding:"5px 14px"}, inA ? {background:CL.blue, color:"#fff", borderColor:CL.blue} : {})}>A</button>
+                          <button onClick={function(){ assign(p.id, "b"); }} style={Object.assign({}, S.pillBtn, {fontSize:12, padding:"5px 14px"}, inB ? {background:CL.red, color:"#fff", borderColor:CL.red} : {})}>B</button>
+                        </div>
+                      );
+                    })}
+                    <div style={{display:"flex", gap:8, marginTop:8}}>
+                      <div style={{flex:1}}><div style={Object.assign({}, S.label, {marginBottom:4})}>Front $</div><input style={Object.assign({}, S.input, {margin:0})} type="number" value={nsFront} onChange={function(e){ setNsFront(e.target.value); }}/></div>
+                      <div style={{flex:1}}><div style={Object.assign({}, S.label, {marginBottom:4})}>Back $</div><input style={Object.assign({}, S.input, {margin:0})} type="number" value={nsBack} onChange={function(e){ setNsBack(e.target.value); }}/></div>
+                      <div style={{flex:1}}><div style={Object.assign({}, S.label, {marginBottom:4})}>Total $</div><input style={Object.assign({}, S.input, {margin:0})} type="number" value={nsTotal} onChange={function(e){ setNsTotal(e.target.value); }}/></div>
+                    </div>
+                    <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginTop:6}}>Each player wins/loses these amounts per segment. Auto-scored from the round — no manual entry.</div>
+                    <button style={Object.assign({}, S.primaryBtn, {opacity:(nsA.length===0||nsB.length===0)?0.5:1})} onClick={addGame}>Save Nassau</button>
+                  </div>
+                );
+              })() : (
+                <div>
+                  <input style={Object.assign({}, S.input, {width:"100%", marginTop:8})} type="number" value={stake} onChange={function(e) { setStake(e.target.value); }} placeholder="Stake $"/>
+                  <div style={Object.assign({}, S.cardTitle, {marginTop:8})}>Results (+ won / - lost)</div>
+                  {players.map(function(p) { return <div key={p.id} style={{display:"flex", justifyContent:"space-between", alignItems:"center", padding:"6px 0", fontSize:14, color:"#fff"}}><span>{p.emoji+" "+p.name}</span><input style={Object.assign({}, S.input, {width:80, margin:0})} type="number" value={results[p.id]||""} onChange={function(e) { var r = Object.assign({},results); r[p.id] = parseFloat(e.target.value)||0; setResults(r); }} placeholder="$0"/></div>; })}
+                  <button style={S.primaryBtn} onClick={addGame}>Save Game</button>
+                </div>
+              )}
             </div>
           )}
           <div style={S.card}>
@@ -4233,7 +4348,37 @@ function BetsTab(props) {
           {games.length > 0 && (
             <div style={S.card}>
               <div style={S.cardTitle}>Game Log</div>
-              {games.map(function(g) { var gt = GAME_TYPES.find(function(t) { return t.id===g.type; }); return (
+              {games.map(function(g) { var gt = GAME_TYPES.find(function(t) { return t.id===g.type; });
+                if (g.type === "nassau") {
+                  var nr = nassauResult(g, players, scores);
+                  var nm = function(id){ var p=players.find(function(x){return x.id===id;}); return p?p.name.split(" ")[0]:id; };
+                  var aNames = (g.sideA||[]).map(nm).join(" & "), bNames = (g.sideB||[]).map(nm).join(" & ");
+                  function segLine(label, seg) {
+                    if (!seg) return null;
+                    var txt, col;
+                    if (!seg.complete) { txt = (seg.aWon===seg.bWon ? "all square" : (seg.aWon>seg.bWon?aNames:bNames)+" "+Math.abs(seg.aWon-seg.bWon)+" up")+" (in progress)"; col = CL.muted; }
+                    else if (seg.winner === null) { txt = "halved — no money"; col = CL.muted; }
+                    else { txt = (seg.winner==="a"?aNames:bNames)+" win · +$"+(Math.round((seg.winEach||0)*100)/100)+" each"; col = "#22c55e"; }
+                    return <div key={label} style={{display:"flex", justifyContent:"space-between", fontSize:12, fontFamily:"system-ui", marginTop:2}}><span style={{color:CL.muted}}>{label+" ($"+(seg.val||0)+")"}</span><span style={{color:col}}>{txt}</span></div>;
+                  }
+                  return (
+                    <div key={g.id} style={Object.assign({padding:"10px 0"}, S.separator)}>
+                      <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start"}}>
+                        <div style={{flex:1}}>
+                          <div style={{fontSize:14, color:"#fff", fontFamily:"system-ui"}}>{"🏌️ Nassau — "+aNames+" vs "+bNames}</div>
+                          <div style={S.label}>{"R"+((g.round||0)+1)+" · "+COURSES[g.round||0].name+" · net match play"}</div>
+                        </div>
+                        <button style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:16, flexShrink:0}} onClick={function() { update({games:games.filter(function(x) { return x.id!==g.id; })}); }}>✕</button>
+                      </div>
+                      <div style={{marginTop:4}}>
+                        {segLine("Front 9", nr.segments.front)}
+                        {segLine("Back 9", nr.segments.back)}
+                        {segLine("Total 18", nr.segments.total)}
+                      </div>
+                    </div>
+                  );
+                }
+                return (
                 <div key={g.id} style={Object.assign({display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 0"}, S.separator)}>
                   <div><div style={{fontSize:14, color:"#fff"}}>{(gt?gt.icon:"")+" "+(gt?gt.name:"")}</div><div style={S.label}>{"R"+(g.round+1)+" · $"+g.stake}</div></div>
                   <button style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:16}} onClick={function() { update({games:games.filter(function(x) { return x.id!==g.id; })}); }}>✕</button>
