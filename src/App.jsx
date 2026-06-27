@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, savePropEligible, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
+import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, savePropUnits, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "3.26";
+const APP_VERSION = "3.27";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 // Skins and Individual Gross Stableford were removed to simplify the bet menu.
@@ -830,12 +830,20 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
       var winner = (prop.settled && prop.winner) ? prop.winner : autoPropWinner(prop, players, scores);
       if (!winner) return;
       var buyin = prop.buyin || DEFAULT_BUYIN;
+      var units = prop.units || {};
       var elig = prop.eligible || [];
       // Defensive: the winner must be among the eligible. If somehow not, no money moves.
       if (elig.indexOf(winner) < 0) return;
+      var uW = units[winner] || 1;
+      // Full multiplier: each player is in for their unit count. The winner collects, from
+      // each loser, buyin × (winner's units) × (that loser's units) — so a player's units
+      // scale both their winnings and their losses. Reduces to the old single-unit math when
+      // everyone holds one unit, and every transfer is paired so it always sums to $0.
       elig.forEach(function(pid) {
-        if (pid === winner) balances[pid] = (balances[pid] || 0) + (buyin * (elig.length - 1));
-        else balances[pid] = (balances[pid] || 0) - buyin;
+        if (pid === winner) return;
+        var amt = buyin * uW * (units[pid] || 1);
+        balances[pid] = (balances[pid] || 0) - amt;
+        balances[winner] = (balances[winner] || 0) + amt;
       });
     });
   }
@@ -1279,16 +1287,27 @@ export default function App() {
         }
         merged.bets = syncProps(DEFAULT_PROPS, merged.bets);
         merged.individualProps = syncProps(DEFAULT_INDIVIDUAL_PROPS, merged.individualProps);
-        // Prop opt-ins ("who's in") now live in a dedicated propEligible map
-        // ({ propId: [pids] }) written atomically — never inside the individualProps
-        // array — so a stale full-array save can't blank them (same fix as the
-        // foursome backers). The map is the source of truth: overlay it onto each
-        // prop's `eligible` for the rest of the app (settlement + display) to read.
+        // Prop entries now carry a UNIT COUNT per player. The source of truth is the
+        // propUnits map ({ propId: { pid: count } }), written one field path at a time so
+        // it's clobber-proof (same discipline as the foursome backers / opt-ins). We derive
+        // each prop's `units` (counts) and `eligible` (anyone with >=1 unit) for settlement
+        // and display. Fallback: if a prop has no propUnits yet, treat the legacy
+        // propEligible / eligible membership as 1 unit each, so nothing is lost.
         (function() {
+          var pu = (merged.propUnits && typeof merged.propUnits === "object" && !Array.isArray(merged.propUnits)) ? merged.propUnits : {};
           var pe = (merged.propEligible && typeof merged.propEligible === "object" && !Array.isArray(merged.propEligible)) ? merged.propEligible : {};
           merged.individualProps = merged.individualProps.map(function(p) {
-            return Array.isArray(pe[p.id]) ? Object.assign({}, p, { eligible: pe[p.id] }) : p;
+            var u = {};
+            if (pu[p.id] && typeof pu[p.id] === "object") {
+              Object.keys(pu[p.id]).forEach(function(pid) { var n = Number(pu[p.id][pid]) || 0; if (n > 0) u[pid] = n; });
+            } else {
+              var legacy = Array.isArray(pe[p.id]) ? pe[p.id] : (Array.isArray(p.eligible) ? p.eligible : []);
+              legacy.forEach(function(pid) { u[pid] = 1; });
+            }
+            var elig = Object.keys(u).filter(function(pid) { return u[pid] > 0; });
+            return Object.assign({}, p, { units: u, eligible: elig });
           });
+          merged.propUnits = pu;
           merged.propEligible = pe;
         })();
         // Update active slopes based on selected tees
@@ -1586,19 +1605,23 @@ export default function App() {
       return Object.assign({}, prev, { foursomeBackers: fb });
     });
   }, [setState]);
-  // Prop opt-ins use the same clobber-proof approach as the backers: optimistic local
-  // update to the propEligible map (and mirrored onto the prop's `eligible` for instant
-  // display), with the durable atomic arrayUnion/arrayRemove done by savePropEligible
-  // in the component. Never routes through the full-document save, so a concurrent
-  // save from another phone can no longer blank the opt-ins.
-  var togglePropEligibleLocal = useCallback(function(propId, pid, isIn) {
+  // Prop unit counts use the same clobber-proof approach as the backers: optimistic local
+  // update to the propUnits map (and mirrored onto the prop's `units`/`eligible` for instant
+  // display), with the durable atomic field-path write done by savePropUnits in the
+  // component. Never routes through the full-document save, so a concurrent save from
+  // another phone can no longer blank or change anyone's units.
+  var setPropUnitsLocal = useCallback(function(propId, pid, count) {
     setState(function(prev) {
-      var pe = Object.assign({}, prev.propEligible || {});
-      var cur = (Array.isArray(pe[propId]) ? pe[propId] : []).filter(function(id) { return id !== pid; });
-      if (isIn) cur.push(pid);
-      pe[propId] = cur;
-      var nip = (prev.individualProps || []).map(function(x) { return x.id === propId ? Object.assign({}, x, { eligible: cur }) : x; });
-      return Object.assign({}, prev, { propEligible: pe, individualProps: nip });
+      var pu = Object.assign({}, prev.propUnits || {});
+      var m = Object.assign({}, pu[propId] || {});
+      if (count > 0) m[pid] = count; else delete m[pid];
+      pu[propId] = m;
+      var nip = (prev.individualProps || []).map(function(x) {
+        if (x.id !== propId) return x;
+        var u = {}; Object.keys(m).forEach(function(k) { if (m[k] > 0) u[k] = m[k]; });
+        return Object.assign({}, x, { units: u, eligible: Object.keys(u) });
+      });
+      return Object.assign({}, prev, { propUnits: pu, individualProps: nip });
     });
   }, [setState]);
 
@@ -1796,7 +1819,7 @@ export default function App() {
             <div style={{fontSize:14, color:CL.muted, fontFamily:"system-ui", marginBottom:20}}>Sign in with the group passcode to view bets and games.</div>
             <button onClick={handleLogout} style={Object.assign({}, S.primaryBtn, {width:"auto", padding:"12px 32px"})}>Sign In</button>
           </div>
-        ) : <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} overUnderProps={state.overUnderProps || DEFAULT_OU_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} foursomeBackers={state.foursomeBackers || {}} onBack={backFoursomeLocal} onUnback={unbackFoursomeLocal} onTogglePropElig={togglePropEligibleLocal} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} isGuest={isGuest} canEdit={canEditBets} skinsEligible={state.skinsEligible || {gross:[], net:[], course:[[],[],[],[],[]]}} />)}
+        ) : <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} overUnderProps={state.overUnderProps || DEFAULT_OU_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} foursomeBackers={state.foursomeBackers || {}} onBack={backFoursomeLocal} onUnback={unbackFoursomeLocal} onSetPropUnits={setPropUnitsLocal} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} isGuest={isGuest} canEdit={canEditBets} skinsEligible={state.skinsEligible || {gross:[], net:[], course:[[],[],[],[],[]]}} />)}
         {activeTab === "expenses" && (isGuest ? (
           <div style={{padding:"60px 24px", textAlign:"center"}}>
             <div style={{fontSize:48, marginBottom:16}}>🔒</div>
@@ -3907,7 +3930,8 @@ function BetsTab(props) {
               var isAuto = !!autoWin && !prop.settled;
               var winner = players.find(function(x) { return x.id === effWinner; });
               var eligible = prop.eligible || [];
-              var pot = (prop.buyin || DEFAULT_BUYIN) * eligible.length;
+              var totalUnits = eligible.reduce(function(s, pid){ return s + ((prop.units && prop.units[pid]) || 1); }, 0);
+              var pot = (prop.buyin || DEFAULT_BUYIN) * totalUnits;
               // Compute the current NET leader among eligible players.
               // Stableford-style props (ip8 / ipsf*) use net Stableford points;
               // everything else uses net total score (lower is better).
@@ -3943,7 +3967,7 @@ function BetsTab(props) {
                     <div style={{flex:1}}>
                       <div style={{fontSize:15, fontWeight:600, color:effSettled?CL.muted:"#fff", textDecoration:effSettled?"line-through":"none"}}>{prop.name}</div>
                       {prop.desc && <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", marginTop:2}}>{prop.desc}</div>}
-                      <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginTop:2}}>{"$"+(prop.buyin||DEFAULT_BUYIN)+"/player · "+eligible.length+" in · $"+pot+" pot"}</div>
+                      <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginTop:2}}>{"$"+(prop.buyin||DEFAULT_BUYIN)+"/unit · "+totalUnits+" unit"+(totalUnits!==1?"s":"")+" in"}</div>
                       {leader && <div style={{fontSize:12, color:CL.blue, fontFamily:"system-ui", marginTop:3}}>{leader.tied ? "Tied: "+leader.tiedPlayers.map(function(t){return t.player.name.split(" ")[0];}).join(", ")+" ("+leader.val+(leader.higherWins?" pts)":" net)") : "Leading: "+leader.player.emoji+" "+leader.player.name.split(" ")[0]+" ("+leader.val+(leader.higherWins?" pts)":" net)")}</div>}
                     </div>
                     {!effSettled && props.canEdit && <button onClick={function() { if (confirm("Delete this prop?")) update({individualProps:individualProps.filter(function(x) { return x.id!==prop.id; })}); }} style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:14, flexShrink:0}}>🗑</button>}
@@ -3966,19 +3990,28 @@ function BetsTab(props) {
                     </div>
                   ) : (
                     <div style={{marginTop:8}}>
-                      {/* Eligibility toggles — tap a player to include/exclude */}
-                      <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginBottom:4}}>Who's in:</div>
+                      {/* Unit stepper — tap a player to add a unit; − / + to adjust. 0 units = out. */}
+                      <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginBottom:4}}>Who's in — tap to add, use − / + for multiple units:</div>
                       <div style={{display:"flex", gap:4, flexWrap:"wrap", marginBottom:8}}>
                         {players.map(function(p) {
-                          var isIn = eligible.indexOf(p.id) >= 0;
-                          return <button key={p.id} onClick={function() {
-                            if (!props.canEdit) return; // guests can't edit bets (matches the old guarded path)
-                            // Atomic, clobber-proof opt-in (mirrors the foursome backers):
-                            // optimistic local update + a durable arrayUnion/arrayRemove to
-                            // the propEligible map, so a stale phone can never blank the list.
-                            props.onTogglePropElig(prop.id, p.id, !isIn); // optimistic local state
-                            savePropEligible(prop.id, p.id, !isIn);       // durable atomic write
-                          }} style={Object.assign({}, S.pillBtn, isIn ? {background:"rgba(34,197,94,0.2)", borderColor:"#22c55e", color:"#22c55e"} : {opacity:0.6})}>{(isIn?"✓ ":"")+p.emoji+" "+p.name.split(" ")[0]}</button>;
+                          var cnt = (prop.units && prop.units[p.id]) || 0;
+                          var isIn = cnt > 0;
+                          function setU(n) {
+                            if (!props.canEdit) return; // guests can't edit bets
+                            var nv = Math.max(0, n);
+                            // Atomic, clobber-proof: optimistic local update + durable per-field write.
+                            props.onSetPropUnits(prop.id, p.id, nv);
+                            savePropUnits(prop.id, p.id, nv);
+                          }
+                          if (!isIn) {
+                            return <button key={p.id} onClick={function() { setU(1); }} style={Object.assign({}, S.pillBtn, {opacity:0.6})}>{p.emoji+" "+p.name.split(" ")[0]}</button>;
+                          }
+                          return <span key={p.id} style={Object.assign({}, S.pillBtn, {background:"rgba(34,197,94,0.2)", borderColor:"#22c55e", color:"#22c55e", display:"inline-flex", alignItems:"center", gap:5, padding:"4px 7px"})}>
+                            <span onClick={function() { setU(cnt-1); }} style={{cursor:"pointer", fontWeight:700, fontSize:16, lineHeight:1, padding:"0 3px", opacity:props.canEdit?1:0.4}}>−</span>
+                            <span style={{fontSize:12}}>{p.emoji+" "+p.name.split(" ")[0]}</span>
+                            <span style={{fontSize:12, fontWeight:800}}>{"×"+cnt}</span>
+                            <span onClick={function() { setU(cnt+1); }} style={{cursor:"pointer", fontWeight:700, fontSize:16, lineHeight:1, padding:"0 3px", opacity:props.canEdit?1:0.4}}>+</span>
+                          </span>;
                         })}
                       </div>
                       {(prop.id === "ip8" || (prop.id && prop.id.indexOf("ipsf")===0) || prop.id === "ip1") && (

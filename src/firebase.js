@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, doc, setDoc, updateDoc, onSnapshot, collection, addDoc, query, orderBy, limit, deleteDoc, arrayUnion, arrayRemove } from "firebase/firestore";
+import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, doc, setDoc, updateDoc, onSnapshot, collection, addDoc, query, orderBy, limit, deleteDoc, arrayUnion, arrayRemove, deleteField } from "firebase/firestore";
 
 // ╔══════════════════════════════════════════════════════╗
 // ║  REPLACE THESE WITH YOUR FIREBASE PROJECT VALUES    ║
@@ -144,6 +144,21 @@ export function savePropEligible(propId, pid, isIn) {
   payload["propEligible." + propId] = isIn ? arrayUnion(pid) : arrayRemove(pid);
   return updateDoc(tripRef, payload).catch(function(err) {
     console.error("Prop eligible save failed:", err);
+    throw err;
+  });
+}
+
+// Prop UNIT counts ("Brian is in for 3 units"). Each player's count for a prop is its
+// own field path (propUnits.<propId>.<pid>), set directly — so one phone changing one
+// player's units can never clobber another player's units or another prop. A count of 0
+// means "out" and removes the entry. This is the same atomic, clobber-proof discipline
+// as the foursome backers and the opt-ins, extended from membership to a quantity.
+export function savePropUnits(propId, pid, count) {
+  var payload = {};
+  var field = "propUnits." + propId + "." + pid;
+  payload[field] = count > 0 ? count : deleteField();
+  return updateDoc(tripRef, payload).catch(function(err) {
+    console.error("Prop units save failed:", err);
     throw err;
   });
 }
