@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, savePropUnits, saveOuUnits, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "4.0";
+const APP_VERSION = "4.2";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 // Skins and Individual Gross Stableford were removed to simplify the bet menu.
@@ -614,28 +614,38 @@ function getTotalSkins(scores, players, eligibleIds, useNet) {
   return grandTotal;
 }
 
-// Team Stableford for a round — sum of the best N scores on the team that round.
-// bestN = how many scores count (e.g. 2 of 4). Default: all count.
-function getTeamRoundStableford(scores, players, teamIds, ri, bestN) {
-  var pts = teamIds.map(function(pid) {
-    var p = players.find(function(x) { return x.id === pid; });
-    if (!p) return null;
-    return getRoundStableford(scores, pid, ri, p.handicap);
-  }).filter(function(v) { return v !== null; });
-  if (pts.length === 0) return null;
-  pts.sort(function(a, b) { return b - a; }); // highest first
-  var count = bestN && bestN < pts.length ? bestN : pts.length;
-  var t = 0;
-  for (var i = 0; i < count; i++) t += pts[i];
-  return t;
+// Best-ball Team Stableford for a round. For each of the 18 holes we count ONLY the
+// team's single best (highest) net-Stableford ball — not all four added together — and
+// sum those best balls across the round. A hole starts counting as soon as any one team
+// member has posted it; returns null until the team has played at least one hole.
+function getTeamRoundBestBall(scores, players, teamIds, ri) {
+  var course = COURSES[ri];
+  if (!course || !course.pars || !course.si) return null;
+  var any = false;
+  var total = 0;
+  for (var hi = 0; hi < 18; hi++) {
+    var best = null;
+    teamIds.forEach(function(pid) {
+      var p = players.find(function(x) { return x.id === pid; });
+      if (!p) return;
+      var h = scores[pid] && scores[pid][ri];
+      var g = h ? h[hi] : null;
+      if (g === null || g === undefined) return;
+      var pts = stablefordPointsForHole(g, course.pars[hi], getCourseHandicap(p.handicap, ri), course.si[hi]);
+      if (pts === null) return;
+      if (best === null || pts > best) best = pts; // keep the team's best ball on this hole
+    });
+    if (best !== null) { total += best; any = true; }
+  }
+  return any ? total : null;
 }
 
-// Team Stableford total across all rounds
-function getTeamTotalStableford(scores, players, teamIds, bestN) {
+// Best-ball Team Stableford across all five rounds — the sum of each round's best-ball total.
+function getTeamTotalBestBall(scores, players, teamIds) {
   var t = 0;
   var any = false;
   COURSES.forEach(function(_, ri) {
-    var p = getTeamRoundStableford(scores, players, teamIds, ri, bestN);
+    var p = getTeamRoundBestBall(scores, players, teamIds, ri);
     if (p !== null) { t += p; any = true; }
   });
   return any ? t : 0;
@@ -892,8 +902,8 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
     var tsMatchup = TEAM_MATCHUPS[0];
     var tsA = resolveTeam(tsMatchup.teamA, players);
     var tsB = resolveTeam(tsMatchup.teamB, players);
-    var tsTotA = getTeamTotalStableford(scores, players, tsA, null);
-    var tsTotB = getTeamTotalStableford(scores, players, tsB, null);
+    var tsTotA = getTeamTotalBestBall(scores, players, tsA);
+    var tsTotB = getTeamTotalBestBall(scores, players, tsB);
     if ((tsTotA > 0 || tsTotB > 0) && tsTotA !== tsTotB && tsA.length > 0 && tsB.length > 0) {
       var TS_STAKE = STAKE_TEAM;
       var tsWinIds = tsTotA > tsTotB ? tsA : tsB;
@@ -2636,6 +2646,9 @@ function ScoresTab(props) {
   var sd = useState(null); var scanData = sd[0], setScanData = sd[1];
   var sl = useState(false); var scanLoading = sl[0], setScanLoading = sl[1];
   var se = useState(null); var scanErr = se[0], setScanErr = se[1];
+  // Which scanned rows have been assigned (rowIndex -> playerId). Lets a single scan of a
+  // multi-player card assign every row, instead of closing after the first one.
+  var asg = useState({}); var assigned = asg[0], setAssigned = asg[1];
   // Handicap editor (relocated from Bets)
   var hceOpen = useState(false); var hcEditorOpen = hceOpen[0], setHcEditorOpen = hceOpen[1];
   var hceId = useState(null); var hcEditId = hceId[0], setHcEditId = hceId[1];
@@ -2681,13 +2694,19 @@ function ScoresTab(props) {
     saveScore(pid, sel, cur);
   }
 
-  function bulkSet(pid, arr) {
+  function bulkSet(pid, arr, rowIdx) {
     if (props.isGuest) return;
     var clean = arr.slice(0, 18).map(function(s) { return s > 0 ? s : null; });
     while (clean.length < 18) clean.push(null);
     saveScore(pid, sel, clean);
-    setScanData(null); setScanning(false);
+    // Keep the scanner open so every row on a multi-player card can be assigned in one
+    // pass; mark this row done. The user closes with "Done" when finished.
+    if (rowIdx !== undefined && rowIdx !== null) {
+      setAssigned(function(prev) { var n = Object.assign({}, prev); n[rowIdx] = pid; return n; });
+    }
   }
+
+  function closeScan() { setScanData(null); setScanning(false); setAssigned({}); }
 
   function clearRound(pid) {
     if (props.isGuest) return;
@@ -2698,7 +2717,7 @@ function ScoresTab(props) {
     var file = e.target.files && e.target.files[0];
     if (!file) return;
     if (props.isGuest) return;
-    setScanLoading(true); setScanErr(null); setScanData(null);
+    setScanLoading(true); setScanErr(null); setScanData(null); setAssigned({});
 
     var names = (players || []).map(function(p) { return p.name; });
 
@@ -2771,7 +2790,7 @@ function ScoresTab(props) {
     <div>
       <div style={S.pageHeader}>
         <div style={S.pageTitle}>Scorecard</div>
-        {!props.isGuest && <button onClick={function() { setScanning(!scanning); setScanData(null); setScanErr(null); }} style={Object.assign({}, S.addBtn, {fontSize:13})}>{scanning ? "✕ Close" : "📷 Scan"}</button>}
+        {!props.isGuest && <button onClick={function() { if (scanning) { closeScan(); } else { setScanning(true); setScanData(null); setScanErr(null); setAssigned({}); } }} style={Object.assign({}, S.addBtn, {fontSize:13})}>{scanning ? "✕ Close" : "📷 Scan"}</button>}
       </div>
 
       {scanning && (
@@ -2793,8 +2812,10 @@ function ScoresTab(props) {
               <div style={{fontSize:13, color:"#fff", fontWeight:600, fontFamily:"system-ui", marginBottom:8}}>{"Found "+scanData.players.length+" row(s):"}</div>
               {scanData.players.map(function(sp, si) {
                 var total = sp.scores.reduce(function(a,b) { return a+b; }, 0);
+                var assignedPid = assigned[si];
+                var assignedP = assignedPid ? players.find(function(x){return x.id===assignedPid;}) : null;
                 return (
-                  <div key={si} style={{marginBottom:12, padding:12, background:"rgba(37,99,235,0.1)", borderRadius:6, border:"1px solid rgba(37,99,235,0.2)"}}>
+                  <div key={si} style={{marginBottom:12, padding:12, background: assignedP ? "rgba(34,197,94,0.1)" : "rgba(37,99,235,0.1)", borderRadius:6, border:"1px solid "+(assignedP ? "rgba(34,197,94,0.4)" : "rgba(37,99,235,0.2)")}}>
                     <div style={{display:"flex", justifyContent:"space-between", marginBottom:6}}>
                       <div style={{fontSize:14, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{sp.name}</div>
                       <div style={{fontSize:14, fontWeight:700, color:CL.red, fontFamily:"system-ui"}}>{total > 0 ? total : ""}</div>
@@ -2804,16 +2825,19 @@ function ScoresTab(props) {
                         return <div key={hi} style={{textAlign:"center", padding:"2px 0", background:"rgba(30,58,95,0.3)", borderRadius:3}}><div style={{fontSize:8, color:CL.muted, fontFamily:"system-ui"}}>{hi+1}</div><div style={{fontSize:12, color:"#fff", fontWeight:700, fontFamily:"system-ui"}}>{sc>0?sc:"·"}</div></div>;
                       })}
                     </div>
-                    <div style={Object.assign({}, S.label, {marginBottom:6})}>Assign to:</div>
+                    <div style={Object.assign({}, S.label, {marginBottom:6})}>{assignedP ? ("\u2713 Assigned to "+assignedP.name.split(" ")[0]+" \u00b7 tap to change") : "Assign to:"}</div>
                     <div style={{display:"flex", gap:4, flexWrap:"wrap"}}>
-                      {players.map(function(p) { return <button key={p.id} onClick={function() { bulkSet(p.id, sp.scores); }} style={S.pillBtn}>{p.emoji+" "+p.name.split(" ")[0]}</button>; })}
+                      {players.map(function(p) { var on = assignedPid===p.id; return <button key={p.id} onClick={function() { bulkSet(p.id, sp.scores, si); }} style={Object.assign({}, S.pillBtn, on ? {background:"rgba(34,197,94,0.25)", borderColor:"#22c55e", color:"#22c55e"} : {})}>{(on?"\u2713 ":"")+p.emoji+" "+p.name.split(" ")[0]}</button>; })}
                     </div>
                   </div>
                 );
               })}
-              <label style={Object.assign({}, S.secondaryBtn, {display:"block", textAlign:"center", cursor:"pointer", marginTop:8})}>
-                Scan Another<input type="file" accept="image/*" capture="environment" onChange={handlePhoto} style={{display:"none"}} />
-              </label>
+              <div style={{display:"flex", gap:8, marginTop:8}}>
+                <label style={Object.assign({}, S.secondaryBtn, {flex:1, display:"block", textAlign:"center", cursor:"pointer", margin:0})}>
+                  Scan Another<input type="file" accept="image/*" capture="environment" onChange={handlePhoto} style={{display:"none"}} />
+                </label>
+                <button onClick={closeScan} style={{flex:1, padding:14, borderRadius:8, border:"none", background:CL.red, color:"#fff", fontSize:15, fontWeight:700, fontFamily:"system-ui", cursor:"pointer"}}>{"Done"+(Object.keys(assigned).length ? " ("+Object.keys(assigned).length+")" : "")}</button>
+              </div>
             </div>
           )}
         </div>
@@ -2949,10 +2973,22 @@ function ScoresTab(props) {
                 </div>
               </div>
             </div>
-            {gross !== null && (
-              <div style={{display:"flex", gap:6, marginBottom:6, flexWrap:"wrap"}}>
-                <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui"}}>{"Gross — OUT: "+(frontCount>0?frontTotal:"—")+" IN: "+(backCount>0?backTotal:"—")}</div>
-                <div style={{fontSize:11, color:CL.red, fontFamily:"system-ui"}}>{"Net — OUT: "+(frontCount>0?frontNetTotal:"—")+" IN: "+(backCount>0?backNetTotal:"—")}</div>
+            {(frontCount>0 || backCount>0) && (
+              <div style={{marginBottom:8, padding:"7px 10px", background:"rgba(30,58,95,0.18)", borderRadius:6}}>
+                <div style={{display:"grid", gridTemplateColumns:"42px 1fr 1fr 1fr", gap:4, alignItems:"center", fontFamily:"system-ui"}}>
+                  <div></div>
+                  <div style={{fontSize:9, color:CL.muted, textAlign:"center", fontWeight:700}}>OUT</div>
+                  <div style={{fontSize:9, color:CL.muted, textAlign:"center", fontWeight:700}}>IN</div>
+                  <div style={{fontSize:9, color:CL.muted, textAlign:"center", fontWeight:700}}>TOTAL</div>
+                  <div style={{fontSize:11, color:"#fff", fontWeight:700}}>Gross</div>
+                  <div style={{fontSize:15, color:"#fff", textAlign:"center", fontWeight:700}}>{frontCount>0?frontTotal:"—"}</div>
+                  <div style={{fontSize:15, color:"#fff", textAlign:"center", fontWeight:700}}>{backCount>0?backTotal:"—"}</div>
+                  <div style={{fontSize:15, color:"#fff", textAlign:"center", fontWeight:800}}>{frontTotal+backTotal}</div>
+                  <div style={{fontSize:11, color:CL.red, fontWeight:700}}>Net</div>
+                  <div style={{fontSize:15, color:CL.red, textAlign:"center", fontWeight:700}}>{frontCount>0?frontNetTotal:"—"}</div>
+                  <div style={{fontSize:15, color:CL.red, textAlign:"center", fontWeight:700}}>{backCount>0?backNetTotal:"—"}</div>
+                  <div style={{fontSize:15, color:CL.red, textAlign:"center", fontWeight:800}}>{frontNetTotal+backNetTotal}</div>
+                </div>
               </div>
             )}
             <div style={{display:"grid", gridTemplateColumns:"repeat(9,1fr)", gap:3}}>
@@ -2972,6 +3008,23 @@ function ScoresTab(props) {
                   </button>
                 );
               })}
+            </div>
+            {/* Stableford by round (net) — this player's points per course + trip total */}
+            <div style={{marginTop:8, paddingTop:8, borderTop:"1px solid "+CL.border}}>
+              <div style={{fontSize:9, color:CL.muted, fontFamily:"system-ui", fontWeight:700, marginBottom:4, letterSpacing:0.5}}>STABLEFORD BY ROUND (NET)</div>
+              <div style={{display:"flex", gap:3}}>
+                {COURSES.map(function(c, ri) {
+                  var sf = getRoundStableford(scores, player.id, ri, player.handicap);
+                  return <div key={ri} style={{flex:1, textAlign:"center", background: ri===sel ? "rgba(220,38,38,0.14)" : "rgba(30,58,95,0.25)", borderRadius:4, padding:"4px 0"}}>
+                    <div style={{fontSize:8, color:CL.muted, fontFamily:"system-ui", fontWeight:600}}>{COURSE_LABELS[ri]}</div>
+                    <div style={{fontSize:14, fontWeight:700, color:"#fff", fontFamily:"system-ui"}}>{sf===null?"–":sf}</div>
+                  </div>;
+                })}
+                <div style={{flex:1, textAlign:"center", background:"rgba(34,197,94,0.14)", borderRadius:4, padding:"4px 0"}}>
+                  <div style={{fontSize:8, color:CL.muted, fontFamily:"system-ui", fontWeight:600}}>TOT</div>
+                  <div style={{fontSize:14, fontWeight:800, color:"#22c55e", fontFamily:"system-ui"}}>{getTotalStableford(scores, player.id, player.handicap) || "–"}</div>
+                </div>
+              </div>
             </div>
           </div>
         );
@@ -3257,8 +3310,8 @@ function LeaderboardTab(props) {
       )}
 
       {view === "stableford" && (function() {
-        var aTotal = getTeamTotalStableford(scores, players, aIds, null);
-        var bTotal = getTeamTotalStableford(scores, players, bIds, null);
+        var aTotal = getTeamTotalBestBall(scores, players, aIds);
+        var bTotal = getTeamTotalBestBall(scores, players, bIds);
         var aLead = aTotal > bTotal, bLead = bTotal > aTotal;
         // Individual stableford leaderboard
         var indiv = players.map(function(p) {
@@ -3270,7 +3323,7 @@ function LeaderboardTab(props) {
             {/* Team Stableford matchup */}
             <div style={S.card}>
               <div style={S.cardTitle}>🏆 Team Stableford</div>
-              <div style={Object.assign({}, S.label, {marginBottom:12})}>Net Stableford points — more is better. All 4 scores count each round.</div>
+              <div style={Object.assign({}, S.label, {marginBottom:12})}>Best-ball net Stableford — more is better. Only the team's best ball on each hole counts.</div>
               <div style={{display:"flex", gap:8, alignItems:"stretch"}}>
                 <div style={Object.assign({}, S.teamBox, aLead ? S.teamBoxWin : {}, {textAlign:"center"})}>
                   <div style={{fontSize:24, marginBottom:2}}>{matchup.teamA.emoji}</div>
@@ -3300,8 +3353,8 @@ function LeaderboardTab(props) {
                 <div style={{width:60, textAlign:"center", fontSize:12, color:CL.muted, fontFamily:"system-ui", fontWeight:600}}>{matchup.teamB.emoji}</div>
               </div>
               {COURSES.map(function(c, ri) {
-                var a = getTeamRoundStableford(scores, players, aIds, ri, null);
-                var b = getTeamRoundStableford(scores, players, bIds, ri, null);
+                var a = getTeamRoundBestBall(scores, players, aIds, ri);
+                var b = getTeamRoundBestBall(scores, players, bIds, ri);
                 if (a === null && b === null) return null;
                 var aw = (a||0) > (b||0), bw = (b||0) > (a||0);
                 return (
@@ -3521,7 +3574,7 @@ function BetsTab(props) {
             {rulesOpen && (
               <div style={{marginTop:4}}>
                 {H("🤖 AUTOMATIC — YOU'RE ALREADY IN, SCORED BY THE APP")}
-                {Row("Team Stableford", "$100/man", "Public ("+pub+") vs Private ("+priv+"). Net Stableford over all 5 rounds — the winning four each collect $100.")}
+                {Row("Team Stableford", "$100/man", "Public ("+pub+") vs Private ("+priv+"). Best-ball net Stableford over all 5 rounds (best ball each hole) — the winning four each collect $100.")}
                 {SHOW_GROSS && Row("Gross Brackets", "$50/man, winner-take-all", "Gross Stableford for the whole trip, split by handicap.  ⛰️ The Mournes: "+mournes+".  🌊 The Causeway: "+causeway+".")}
                 {Row("Foursome Matches", "$"+STAKE_FOURSOME+"/man", "Two 2-v-2 matches each course — your pair's combined net Stableford vs the other pair. You're auto-entered in your own match every round.")}
                 {H("✋ OPT IN — TAP TO JOIN (in the tabs above)")}
@@ -3575,8 +3628,8 @@ function BetsTab(props) {
         var matchup = TEAM_MATCHUPS[0];
         var aIds = resolveTeam(matchup.teamA, players);
         var bIds = resolveTeam(matchup.teamB, players);
-        var aTotal = getTeamTotalStableford(scores, players, aIds, null);
-        var bTotal = getTeamTotalStableford(scores, players, bIds, null);
+        var aTotal = getTeamTotalBestBall(scores, players, aIds);
+        var bTotal = getTeamTotalBestBall(scores, players, bIds);
         var aLead = aTotal > bTotal, bLead = bTotal > aTotal;
         var indiv = players.map(function(p) {
           return { p:p, pts:getTotalStableford(scores, p.id, p.handicap) };
@@ -3587,7 +3640,7 @@ function BetsTab(props) {
             {/* Team Stableford matchup — the main event */}
             <div style={S.card}>
               <div style={S.cardTitle}>🏆 Team Stableford — The Main Event<StatusTag final={tripDone} /></div>
-              <div style={Object.assign({}, S.label, {marginBottom:4})}>Overall team competition. Net Stableford points across all 5 rounds. All 4 scores count each round. More points wins.</div>
+              <div style={Object.assign({}, S.label, {marginBottom:4})}>Overall team competition. Best-ball net Stableford across all 5 rounds — on each hole only the team's single best ball counts. More points wins.</div>
               <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginBottom:12, fontWeight:600}}>{"$"+STAKE_TEAM+"/man · Winning team's players each win $"+STAKE_TEAM}</div>
               <div style={{display:"flex", gap:8, alignItems:"stretch"}}>
                 <div style={Object.assign({}, S.teamBox, aLead ? S.teamBoxWin : {}, {textAlign:"center"})}>
@@ -3619,8 +3672,8 @@ function BetsTab(props) {
                 <div style={{width:60, textAlign:"center", fontSize:12, color:CL.muted, fontFamily:"system-ui", fontWeight:600}}>{matchup.teamB.emoji}</div>
               </div>
               {COURSES.map(function(c, ri) {
-                var a = getTeamRoundStableford(scores, players, aIds, ri, null);
-                var b = getTeamRoundStableford(scores, players, bIds, ri, null);
+                var a = getTeamRoundBestBall(scores, players, aIds, ri);
+                var b = getTeamRoundBestBall(scores, players, bIds, ri);
                 if (a === null && b === null) {
                   return (
                     <div key={ri} style={{display:"flex", alignItems:"center", padding:"8px 0", borderBottom:ri<COURSES.length-1?"1px solid "+CL.border:"none", opacity:0.5}}>
