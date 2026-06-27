@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, savePropUnits, saveOuUnits, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "3.28";
+const APP_VERSION = "4.0";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 // Skins and Individual Gross Stableford were removed to simplify the bet menu.
@@ -694,6 +694,25 @@ function getTripDay() {
 
 // Compute each player's net money balance across every bet, game, and expense.
 // Single source of truth — used by both the Settle Up transfers and Net Balances.
+// Over/Under matching engine: pairs OVER units 1-for-1 against UNDER units. Only matched
+// (paired) units are live; the excess on the heavier side is unmatched and void. Entry
+// order decides who gets matched — earliest in is paired first, the latest excess is left
+// out ("first one in locks the bet"). Returns each player's MATCHED unit count per side;
+// matched-over total always equals matched-under total, so settlement conserves to $0.
+function matchOu(overUnits, underUnits, overTimes, underTimes) {
+  function total(u) { return Object.keys(u || {}).reduce(function(s, id) { return s + (u[id] || 0); }, 0); }
+  var overTot = total(overUnits), underTot = total(underUnits);
+  var M = Math.min(overTot, underTot);
+  function alloc(units, times) {
+    var ids = Object.keys(units || {}).filter(function(id) { return (units[id] || 0) >= 1; });
+    ids.sort(function(a, b) { var ta = (times && times[a]) || 0, tb = (times && times[b]) || 0; return ta !== tb ? ta - tb : (a < b ? -1 : 1); });
+    var matched = {}, remaining = M;
+    ids.forEach(function(id) { var take = Math.min(units[id] || 0, remaining); if (take > 0) matched[id] = take; remaining -= take; });
+    return matched;
+  }
+  return { overMatched: alloc(overUnits, overTimes), underMatched: alloc(underUnits, underTimes), matched: M, overTotal: overTot, underTotal: underTot };
+}
+
 function computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches, overUnderProps) {
   var balances = {};
   players.forEach(function(p) { balances[p.id] = 0; });
@@ -830,49 +849,35 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
       var winner = (prop.settled && prop.winner) ? prop.winner : autoPropWinner(prop, players, scores);
       if (!winner) return;
       var buyin = prop.buyin || DEFAULT_BUYIN;
-      var units = prop.units || {};
       var elig = prop.eligible || [];
       // Defensive: the winner must be among the eligible. If somehow not, no money moves.
       if (elig.indexOf(winner) < 0) return;
-      var uW = units[winner] || 1;
-      // Full multiplier: each player is in for their unit count. The winner collects, from
-      // each loser, buyin × (winner's units) × (that loser's units) — so a player's units
-      // scale both their winnings and their losses. Reduces to the old single-unit math when
-      // everyone holds one unit, and every transfer is paired so it always sums to $0.
+      // One bet per player: the winner collects a single buy-in from each other eligible
+      // player (winner-take-all). Every transfer is paired, so it always sums to $0.
       elig.forEach(function(pid) {
         if (pid === winner) return;
-        var amt = buyin * uW * (units[pid] || 1);
-        balances[pid] = (balances[pid] || 0) - amt;
-        balances[winner] = (balances[winner] || 0) + amt;
+        balances[pid] = (balances[pid] || 0) - buyin;
+        balances[winner] = (balances[winner] || 0) + buyin;
       });
     });
   }
 
-  // Over/Under props — two-sided. Players take "over" or "under" on a line; once the
-  // real figure is known the bet is settled to a result and the LOSING side pays the
-  // WINNING side, split evenly (same conserving math as Head-to-Head). A side with no
-  // takers makes the bet void (no counterparty) — no money moves.
+  // Over/Under props — matched two-sided book. OVER units are paired 1-for-1 against UNDER
+  // units; only matched pairs are live (each an even-money bet at the stake). The unmatched
+  // excess on the heavier side is void. Entry order decides who's matched. Settled manually
+  // once the real figure is known.
   if (overUnderProps) {
     overUnderProps.forEach(function(p) {
       if (!p.settled || !p.result) return;
-      var overU = p.overUnits || {}, underU = p.underUnits || {};
-      var overIds = Object.keys(overU).filter(function(id) { return (overU[id] || 0) >= 1; });
-      // Disjoint the sides defensively (a player should never be on both).
-      var underIds = Object.keys(underU).filter(function(id) { return (underU[id] || 0) >= 1 && overIds.indexOf(id) < 0; });
-      var winIds = p.result === "over" ? overIds : underIds;
-      var loseIds = p.result === "over" ? underIds : overIds;
-      if (winIds.length === 0 || loseIds.length === 0) return; // void — needs both sides
       var stake = p.stake || DEFAULT_BUYIN;
-      var winU = p.result === "over" ? overU : underU;
-      var loseU = p.result === "over" ? underU : overU;
-      var winUnits = winIds.reduce(function(s, id) { return s + (winU[id] || 1); }, 0);
-      var pot = loseIds.reduce(function(s, id) { return s + (loseU[id] || 1); }, 0) * stake;
-      // Multi-unit (parimutuel): each loser pays (their units × stake); that pot is split
-      // among the winning side in proportion to their units. A player's units scale both
-      // their stake and their share. Reduces to the old even split when everyone holds one
-      // unit, and every dollar paid is a dollar received, so it always sums to $0.
-      loseIds.forEach(function(id) { balances[id] = (balances[id] || 0) - (loseU[id] || 1) * stake; });
-      winIds.forEach(function(id) { balances[id] = (balances[id] || 0) + pot * (winU[id] || 1) / winUnits; });
+      var m = matchOu(p.overUnits || {}, p.underUnits || {}, p.overTimes || {}, p.underTimes || {});
+      if (m.matched === 0) return; // nothing paired off — void
+      var winMatched = p.result === "over" ? m.overMatched : m.underMatched;
+      var loseMatched = p.result === "over" ? m.underMatched : m.overMatched;
+      // Each matched unit is even money: winner +stake, loser −stake. Matched-over total
+      // equals matched-under total by construction, so this always sums to $0.
+      Object.keys(winMatched).forEach(function(id) { balances[id] = (balances[id] || 0) + winMatched[id] * stake; });
+      Object.keys(loseMatched).forEach(function(id) { balances[id] = (balances[id] || 0) - loseMatched[id] * stake; });
     });
   }
 
@@ -1332,22 +1337,30 @@ export default function App() {
         if (!Array.isArray(merged.skinsEligible.net)) merged.skinsEligible.net = [];
         if (!Array.isArray(merged.skinsEligible.course)) merged.skinsEligible.course = [];
         while (merged.skinsEligible.course.length < COURSES.length) merged.skinsEligible.course.push([]);
-        // Over/Under props: definitions stay in the synced array; the per-player side &
-        // unit counts now live in a dedicated ouUnits map ({ propId: { over:{pid:n},
-        // under:{pid:n} } }) written one field at a time (clobber-proof, like the foursome
-        // backers). Derive each prop's overUnits/underUnits from the map; fall back to any
-        // legacy over/under arrays (1 unit each) so old data is never lost.
+        // Over/Under props: definitions stay in the synced array; the per-player side,
+        // unit counts, and entry timestamps live in dedicated atomic maps — ouUnits
+        // ({ propId: { over:{pid:n}, under:{pid:n} } }) and ouTimes (same shape, ms epoch
+        // of when each player first took that side) — written one field at a time
+        // (clobber-proof). The timestamps drive the matching engine's "first one in" order.
+        // Derive each prop's overUnits/underUnits + overTimes/underTimes; fall back to any
+        // legacy over/under arrays (1 unit each, ordered by array position) so old data is
+        // never lost.
         if (!Array.isArray(merged.overUnderProps)) merged.overUnderProps = DEFAULT_OU_PROPS.slice();
         var ouMap = (merged.ouUnits && typeof merged.ouUnits === "object" && !Array.isArray(merged.ouUnits)) ? merged.ouUnits : {};
+        var ouTimes = (merged.ouTimes && typeof merged.ouTimes === "object" && !Array.isArray(merged.ouTimes)) ? merged.ouTimes : {};
         merged.overUnderProps = merged.overUnderProps.map(function(p) {
           var entry = (ouMap[p.id] && typeof ouMap[p.id] === "object") ? ouMap[p.id] : {};
+          var tEntry = (ouTimes[p.id] && typeof ouTimes[p.id] === "object") ? ouTimes[p.id] : {};
           var ov = Object.assign({}, (entry.over && typeof entry.over === "object") ? entry.over : {});
           var un = Object.assign({}, (entry.under && typeof entry.under === "object") ? entry.under : {});
-          if (Object.keys(ov).length === 0 && Array.isArray(p.over)) p.over.forEach(function(id) { ov[id] = 1; });
-          if (Object.keys(un).length === 0 && Array.isArray(p.under)) p.under.forEach(function(id) { un[id] = 1; });
-          return Object.assign({}, p, { overUnits: ov, underUnits: un });
+          var ovT = Object.assign({}, (tEntry.over && typeof tEntry.over === "object") ? tEntry.over : {});
+          var unT = Object.assign({}, (tEntry.under && typeof tEntry.under === "object") ? tEntry.under : {});
+          if (Object.keys(ov).length === 0 && Array.isArray(p.over)) p.over.forEach(function(id, i) { ov[id] = 1; ovT[id] = i + 1; });
+          if (Object.keys(un).length === 0 && Array.isArray(p.under)) p.under.forEach(function(id, i) { un[id] = 1; unT[id] = i + 1; });
+          return Object.assign({}, p, { overUnits: ov, underUnits: un, overTimes: ovT, underTimes: unT });
         });
         merged.ouUnits = ouMap;
+        merged.ouTimes = ouTimes;
         // Seed/sync the foursome Stableford matches. The pairings are fixed in code.
         // Backers now live in a dedicated `foursomeBackers` map ({ matchId: {a,b} })
         // written atomically — never inside this array — so a full-document save can't
@@ -1643,22 +1656,25 @@ export default function App() {
       return Object.assign({}, prev, { propUnits: pu, individualProps: nip });
     });
   }, [setState]);
-  // Over/Under: optimistic local update to the ouUnits map (mirrored onto the prop's
-  // overUnits/underUnits for instant display); the durable, clobber-proof per-field write
-  // is done by saveOuUnits in the component. A player sits on one side only.
-  var setOuUnitsLocal = useCallback(function(propId, pid, side, count) {
+  // Over/Under: optimistic local update to the ouUnits + ouTimes maps (mirrored onto the
+  // prop's overUnits/underUnits/overTimes/underTimes for instant display); the durable,
+  // clobber-proof per-field write is done by saveOuUnits in the component. A player sits on
+  // one side only. `ts` is the entry timestamp the component computed (preserved on +/-).
+  var setOuUnitsLocal = useCallback(function(propId, pid, side, count, ts) {
     setState(function(prev) {
       var ou = Object.assign({}, prev.ouUnits || {});
-      var entry = ou[propId] || {};
-      var over = Object.assign({}, entry.over || {});
-      var under = Object.assign({}, entry.under || {});
-      delete over[pid]; delete under[pid];               // leave both, then re-add to chosen side
-      if (count > 0) { (side === "over" ? over : under)[pid] = count; }
+      var tm = Object.assign({}, prev.ouTimes || {});
+      var entry = ou[propId] || {}, tEntry = tm[propId] || {};
+      var over = Object.assign({}, entry.over || {}), under = Object.assign({}, entry.under || {});
+      var overT = Object.assign({}, tEntry.over || {}), underT = Object.assign({}, tEntry.under || {});
+      delete over[pid]; delete under[pid]; delete overT[pid]; delete underT[pid]; // leave both, then re-add to chosen side
+      if (count > 0) { (side === "over" ? over : under)[pid] = count; (side === "over" ? overT : underT)[pid] = ts; }
       ou[propId] = { over: over, under: under };
+      tm[propId] = { over: overT, under: underT };
       var noup = (prev.overUnderProps || []).map(function(x) {
-        return x.id === propId ? Object.assign({}, x, { overUnits: over, underUnits: under }) : x;
+        return x.id === propId ? Object.assign({}, x, { overUnits: over, underUnits: under, overTimes: overT, underTimes: underT }) : x;
       });
-      return Object.assign({}, prev, { ouUnits: ou, overUnderProps: noup });
+      return Object.assign({}, prev, { ouUnits: ou, ouTimes: tm, overUnderProps: noup });
     });
   }, [setState]);
 
@@ -3644,6 +3660,7 @@ function BetsTab(props) {
               // from another phone can never wipe a bet. `props.onBack` performs the
               // optimistic local update; saveFoursomeBack does the durable atomic write.
               function backSide(matchId, pid, side) {
+                if (!props.canEdit) return; // guests can't edit bets (defense-in-depth; also render-gated)
                 var m = foursomeMatches.find(function(x){ return x.id===matchId; });
                 if (m && (m.pairA.indexOf(pid)>=0 || m.pairB.indexOf(pid)>=0)) return; // core player can't back
                 props.onBack(matchId, pid, side);        // optimistic local state
@@ -3967,8 +3984,7 @@ function BetsTab(props) {
               var isAuto = !!autoWin && !prop.settled;
               var winner = players.find(function(x) { return x.id === effWinner; });
               var eligible = prop.eligible || [];
-              var totalUnits = eligible.reduce(function(s, pid){ return s + ((prop.units && prop.units[pid]) || 1); }, 0);
-              var pot = (prop.buyin || DEFAULT_BUYIN) * totalUnits;
+              var pot = (prop.buyin || DEFAULT_BUYIN) * eligible.length; // one bet per player
               // Compute the current NET leader among eligible players.
               // Stableford-style props (ip8 / ipsf*) use net Stableford points;
               // everything else uses net total score (lower is better).
@@ -4004,7 +4020,7 @@ function BetsTab(props) {
                     <div style={{flex:1}}>
                       <div style={{fontSize:15, fontWeight:600, color:effSettled?CL.muted:"#fff", textDecoration:effSettled?"line-through":"none"}}>{prop.name}</div>
                       {prop.desc && <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", marginTop:2}}>{prop.desc}</div>}
-                      <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginTop:2}}>{"$"+(prop.buyin||DEFAULT_BUYIN)+"/unit · "+totalUnits+" unit"+(totalUnits!==1?"s":"")+" in"}</div>
+                      <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginTop:2}}>{"$"+(prop.buyin||DEFAULT_BUYIN)+"/player · "+eligible.length+" in · $"+pot+" pot"}</div>
                       {leader && <div style={{fontSize:12, color:CL.blue, fontFamily:"system-ui", marginTop:3}}>{leader.tied ? "Tied: "+leader.tiedPlayers.map(function(t){return t.player.name.split(" ")[0];}).join(", ")+" ("+leader.val+(leader.higherWins?" pts)":" net)") : "Leading: "+leader.player.emoji+" "+leader.player.name.split(" ")[0]+" ("+leader.val+(leader.higherWins?" pts)":" net)")}</div>}
                     </div>
                     {!effSettled && props.canEdit && <button onClick={function() { if (confirm("Delete this prop?")) update({individualProps:individualProps.filter(function(x) { return x.id!==prop.id; })}); }} style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:14, flexShrink:0}}>🗑</button>}
@@ -4027,28 +4043,19 @@ function BetsTab(props) {
                     </div>
                   ) : (
                     <div style={{marginTop:8}}>
-                      {/* Unit stepper — tap a player to add a unit; − / + to adjust. 0 units = out. */}
-                      <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginBottom:4}}>Who's in — tap to add, use − / + for multiple units:</div>
+                      {/* Single in/out opt-in — each player is in for one buy-in (winner-take-all). One bet only. */}
+                      <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginBottom:4}}>Who's in — tap to opt in or out:</div>
                       <div style={{display:"flex", gap:4, flexWrap:"wrap", marginBottom:8}}>
                         {players.map(function(p) {
-                          var cnt = (prop.units && prop.units[p.id]) || 0;
-                          var isIn = cnt > 0;
-                          function setU(n) {
+                          var isIn = ((prop.units && prop.units[p.id]) || 0) >= 1;
+                          function toggle() {
                             if (!props.canEdit) return; // guests can't edit bets
-                            var nv = Math.max(0, n);
+                            var nv = isIn ? 0 : 1; // one bet per player: in (1) or out (0)
                             // Atomic, clobber-proof: optimistic local update + durable per-field write.
                             props.onSetPropUnits(prop.id, p.id, nv);
                             savePropUnits(prop.id, p.id, nv);
                           }
-                          if (!isIn) {
-                            return <button key={p.id} onClick={function() { setU(1); }} style={Object.assign({}, S.pillBtn, {opacity:0.6})}>{p.emoji+" "+p.name.split(" ")[0]}</button>;
-                          }
-                          return <span key={p.id} style={Object.assign({}, S.pillBtn, {background:"rgba(34,197,94,0.2)", borderColor:"#22c55e", color:"#22c55e", display:"inline-flex", alignItems:"center", gap:5, padding:"4px 7px"})}>
-                            <span onClick={function() { setU(cnt-1); }} style={{cursor:"pointer", fontWeight:700, fontSize:16, lineHeight:1, padding:"0 3px", opacity:props.canEdit?1:0.4}}>−</span>
-                            <span style={{fontSize:12}}>{p.emoji+" "+p.name.split(" ")[0]}</span>
-                            <span style={{fontSize:12, fontWeight:800}}>{"×"+cnt}</span>
-                            <span onClick={function() { setU(cnt+1); }} style={{cursor:"pointer", fontWeight:700, fontSize:16, lineHeight:1, padding:"0 3px", opacity:props.canEdit?1:0.4}}>+</span>
-                          </span>;
+                          return <button key={p.id} onClick={toggle} style={Object.assign({}, S.pillBtn, isIn ? {background:"rgba(34,197,94,0.2)", borderColor:"#22c55e", color:"#22c55e"} : {opacity:0.6})}>{(isIn?"✓ ":"")+p.emoji+" "+p.name.split(" ")[0]}</button>;
                         })}
                       </div>
                       {(prop.id === "ip8" || (prop.id && prop.id.indexOf("ipsf")===0) || prop.id === "ip1") && (
@@ -4097,49 +4104,50 @@ function BetsTab(props) {
           {/* Over/Under Props — two-sided side bets on a numeric line */}
           <div style={S.card}>
             <div style={S.cardTitle}>🎲 Over / Under Props</div>
-            <div style={Object.assign({}, S.label, {marginBottom:12})}>Two-sided bets on a number. Take the OVER or the UNDER — use − / + to take multiple units. Once settled, the losing side pays the winners, split by units.</div>
+            <div style={Object.assign({}, S.label, {marginBottom:12})}>Matched book: OVER units pair 1-for-1 against UNDER units (even money at the stake). Only matched units are live — unmatched excess is void. First in line gets matched first; matched units 🔒 lock and can't be pulled.</div>
             {(function() {
               function firstName(id){ var pl=players.find(function(x){return x.id===id;}); return pl?pl.emoji+" "+pl.name.split(" ")[0]:id; }
               // Atomic, clobber-proof: optimistic local update + per-field write. A player
               // sits on exactly one side; setting a side clears the other. 0 units = off.
-              function setOu(propId, pid, side, n){
+              function setOu(propId, pid, side, n, curTs){
                 if(!props.canEdit) return;
                 var nv=Math.max(0,n);
-                props.onSetOuUnits(propId, pid, side, nv);
-                saveOuUnits(propId, pid, side, nv);
+                var ts = curTs || Date.now(); // preserve place in line on +/-; brand-new entry = now
+                props.onSetOuUnits(propId, pid, side, nv, ts);
+                saveOuUnits(propId, pid, side, nv, ts);
               }
               function settleOU(propId, result){ update({overUnderProps: overUnderProps.map(function(p){ return p.id===propId?Object.assign({},p,{settled:true,result:result}):p; })}); }
               function unsettleOU(propId){ update({overUnderProps: overUnderProps.map(function(p){ return p.id===propId?Object.assign({},p,{settled:false,result:null}):p; })}); }
               return overUnderProps.map(function(p){
                 var overU=p.overUnits||{}, underU=p.underUnits||{};
-                var overIds=Object.keys(overU).filter(function(id){return (overU[id]||0)>=1;});
-                var underIds=Object.keys(underU).filter(function(id){return (underU[id]||0)>=1 && overIds.indexOf(id)<0;});
+                var overT=p.overTimes||{}, underT=p.underTimes||{};
+                var mm=matchOu(overU,underU,overT,underT);
+                var overIds=Object.keys(overU).filter(function(id){return (overU[id]||0)>=1;}).sort(function(a,b){return (overT[a]||0)-(overT[b]||0);});
+                var underIds=Object.keys(underU).filter(function(id){return (underU[id]||0)>=1 && overIds.indexOf(id)<0;}).sort(function(a,b){return (underT[a]||0)-(underT[b]||0);});
                 var inAny=overIds.concat(underIds);
                 var undecided=players.filter(function(pl){return inAny.indexOf(pl.id)<0;});
                 var stake=p.stake||DEFAULT_BUYIN;
-                var overUnits=overIds.reduce(function(s,id){return s+(overU[id]||1);},0);
-                var underUnits=underIds.reduce(function(s,id){return s+(underU[id]||1);},0);
-                var winIds = p.result==="over"?overIds:underIds;
-                var loseIds = p.result==="over"?underIds:overIds;
-                var loseUnits = p.result==="over"?underUnits:overUnits;
-                var voidBet = winIds.length===0||loseIds.length===0;
-                var pot = (!voidBet)?loseUnits*stake:0;
-                function chip(id, side, umap){
-                  var cnt=umap[id]||0; var c = side==="over"?"#22c55e":CL.red;
-                  return <span key={id+side} style={Object.assign({},S.pillBtn,{background:side==="over"?"rgba(34,197,94,0.18)":"rgba(240,69,74,0.18)",borderColor:c,color:c,display:"inline-flex",alignItems:"center",gap:5,padding:"4px 7px",marginRight:4,marginBottom:4})}>
-                    {!p.settled && <span onClick={function(){setOu(p.id,id,side,cnt-1);}} style={{cursor:"pointer",fontWeight:700,fontSize:16,lineHeight:1,padding:"0 3px",opacity:props.canEdit?1:0.4}}>−</span>}
+                var overUnmatched=mm.overTotal-mm.matched, underUnmatched=mm.underTotal-mm.matched;
+                function matchedFor(id,side){ return ((side==="over"?mm.overMatched:mm.underMatched)[id])||0; }
+                function chip(id, side, umap, tmap){
+                  var cnt=umap[id]||0, mcnt=matchedFor(id,side); var c = side==="over"?"#22c55e":CL.red;
+                  var canDec = !p.settled && props.canEdit && cnt>mcnt; // hard-lock: matched units can't be pulled
+                  return <span key={id+side} style={Object.assign({},S.pillBtn,{background:side==="over"?"rgba(34,197,94,0.18)":"rgba(240,69,74,0.18)",borderColor:c,color:c,display:"inline-flex",alignItems:"center",gap:4,padding:"4px 7px",marginRight:4,marginBottom:4})}>
+                    {!p.settled && <span onClick={function(){ if(canDec) setOu(p.id,id,side,cnt-1,tmap[id]); }} style={{cursor:canDec?"pointer":"not-allowed",fontWeight:700,fontSize:16,lineHeight:1,padding:"0 3px",opacity:canDec?1:0.25}}>−</span>}
                     <span style={{fontSize:12}}>{firstName(id)}</span>
                     <span style={{fontSize:12,fontWeight:800}}>{"×"+cnt}</span>
-                    {!p.settled && <span onClick={function(){setOu(p.id,id,side,cnt+1);}} style={{cursor:"pointer",fontWeight:700,fontSize:16,lineHeight:1,padding:"0 3px",opacity:props.canEdit?1:0.4}}>+</span>}
+                    {mcnt>0 && <span style={{fontSize:10,opacity:0.85}} title="matched / locked">{"🔒"+mcnt}</span>}
+                    {!p.settled && <span onClick={function(){ if(props.canEdit) setOu(p.id,id,side,cnt+1,tmap[id]); }} style={{cursor:"pointer",fontWeight:700,fontSize:16,lineHeight:1,padding:"0 3px",opacity:props.canEdit?1:0.4}}>+</span>}
                   </span>;
                 }
-                function sideBox(label, ids, side, umap, color){
+                function sideBox(label, ids, side, umap, tmap, color){
                   var tot=ids.reduce(function(s,id){return s+(umap[id]||1);},0);
+                  var mtot=ids.reduce(function(s,id){return s+matchedFor(id,side);},0);
                   return (
                     <div style={Object.assign({},S.teamBox,{flex:1})}>
-                      <div style={{fontSize:12,fontWeight:700,color:color,fontFamily:"system-ui",marginBottom:6}}>{label+" · "+tot+(tot===1?" unit":" units")}</div>
+                      <div style={{fontSize:12,fontWeight:700,color:color,fontFamily:"system-ui",marginBottom:6}}>{label+" · "+tot+"u · "+mtot+" matched"}</div>
                       {ids.length===0 && <div style={{fontSize:12,color:CL.muted,fontFamily:"system-ui"}}>—</div>}
-                      <div style={{display:"flex",flexWrap:"wrap"}}>{ids.map(function(id){return chip(id,side,umap);})}</div>
+                      <div style={{display:"flex",flexWrap:"wrap"}}>{ids.map(function(id){return chip(id,side,umap,tmap);})}</div>
                     </div>
                   );
                 }
@@ -4153,12 +4161,13 @@ function BetsTab(props) {
                       {!p.settled && props.canEdit && <button onClick={function(){ if(confirm("Delete this over/under?")) update({overUnderProps:overUnderProps.filter(function(x){return x.id!==p.id;})}); }} style={{background:"none",border:"none",color:CL.muted,cursor:"pointer",fontSize:14,flexShrink:0}}>🗑</button>}
                     </div>
                     <div style={{display:"flex",gap:8,marginTop:8}}>
-                      {sideBox("OVER "+p.line, overIds, "over", overU, "#22c55e")}
-                      {sideBox("UNDER "+p.line, underIds, "under", underU, CL.red)}
+                      {sideBox("OVER "+p.line, overIds, "over", overU, overT, "#22c55e")}
+                      {sideBox("UNDER "+p.line, underIds, "under", underU, underT, CL.red)}
                     </div>
+                    <div style={{fontSize:11,color:(overUnmatched>0||underUnmatched>0)?CL.red:CL.muted,fontFamily:"system-ui",marginTop:6}}>{"⚖️ "+mm.matched+" unit"+(mm.matched!==1?"s":"")+" matched"+(overUnmatched>0?" · "+overUnmatched+" OVER unmatched (void unless UNDER catches up)":underUnmatched>0?" · "+underUnmatched+" UNDER unmatched (void unless OVER catches up)":"")}</div>
                     {p.settled ? (
                       <div style={{marginTop:8}}>
-                        <div style={{fontSize:14,color:voidBet?CL.muted:"#22c55e",fontFamily:"system-ui"}}>{voidBet ? ("Settled "+(p.result==="over"?"OVER":"UNDER")+" — void (one side had no takers, no money moves)") : ("🏆 "+(p.result==="over"?"OVER":"UNDER")+" hit — losing side pays $"+pot+", split among winners by units")}</div>
+                        <div style={{fontSize:14,color:mm.matched===0?CL.muted:"#22c55e",fontFamily:"system-ui"}}>{mm.matched===0 ? ("Settled "+(p.result==="over"?"OVER":"UNDER")+" — no units matched, nothing moves") : ("🏆 "+(p.result==="over"?"OVER":"UNDER")+" hit — "+mm.matched+" matched unit"+(mm.matched!==1?"s":"")+" settle even money at $"+stake+" each. Unmatched units void.")}</div>
                         {props.canEdit && <button onClick={function(){unsettleOU(p.id);}} style={{marginTop:6,fontSize:11,color:CL.muted,fontFamily:"system-ui",background:"none",border:"1px solid "+CL.border,borderRadius:6,padding:"5px 12px",cursor:"pointer"}}>↩ Undo</button>}
                       </div>
                     ) : (

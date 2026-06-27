@@ -132,22 +132,6 @@ export function saveFoursomeUnback(matchId, pid) {
   });
 }
 
-// Individual-prop opt-ins ("who's in") use the same atomic, clobber-proof pattern
-// as the foursome backers. Each prop's eligible list lives in its own map entry
-// (propEligible.<propId>) and is changed with arrayUnion/arrayRemove server-side —
-// NEVER by rewriting the whole individualProps array. So two phones opting different
-// players in at once both stick (no last-write-wins), and a stale phone doing an
-// individualProps save can no longer blank everyone's opt-ins. (This was the one
-// remaining list still exposed to the array-clobber that cost us the opt-ins once.)
-export function savePropEligible(propId, pid, isIn) {
-  var payload = {};
-  payload["propEligible." + propId] = isIn ? arrayUnion(pid) : arrayRemove(pid);
-  return updateDoc(tripRef, payload).catch(function(err) {
-    console.error("Prop eligible save failed:", err);
-    throw err;
-  });
-}
-
 // Prop UNIT counts ("Brian is in for 3 units"). Each player's count for a prop is its
 // own field path (propUnits.<propId>.<pid>), set directly — so one phone changing one
 // player's units can never clobber another player's units or another prop. A count of 0
@@ -168,11 +152,15 @@ export function savePropUnits(propId, pid, count) {
 // (ouUnits.<propId>.<side>.<pid>); switching/leaving a side clears the other side so a
 // player never sits on both. Two phones taking different sides both stick, and a stale
 // full-array save can't blank the action.
-export function saveOuUnits(propId, pid, side, count) {
+export function saveOuUnits(propId, pid, side, count, ts) {
   var other = side === "over" ? "under" : "over";
   var payload = {};
   payload["ouUnits." + propId + "." + side + "." + pid] = count > 0 ? count : deleteField();
   payload["ouUnits." + propId + "." + other + "." + pid] = deleteField();
+  // Entry timestamp drives the matching order ("first one in"). Preserved on +/- to keep a
+  // player's place in line; cleared when they leave a side.
+  payload["ouTimes." + propId + "." + side + "." + pid] = (count > 0 && ts) ? ts : deleteField();
+  payload["ouTimes." + propId + "." + other + "." + pid] = deleteField();
   return updateDoc(tripRef, payload).catch(function(err) {
     console.error("O/U units save failed:", err);
     throw err;
