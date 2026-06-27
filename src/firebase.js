@@ -163,6 +163,22 @@ export function savePropUnits(propId, pid, count) {
   });
 }
 
+// Over/Under prop sides + unit counts, same atomic, clobber-proof pattern as the prop
+// opt-ins. Each player's side & count lives at its own field path
+// (ouUnits.<propId>.<side>.<pid>); switching/leaving a side clears the other side so a
+// player never sits on both. Two phones taking different sides both stick, and a stale
+// full-array save can't blank the action.
+export function saveOuUnits(propId, pid, side, count) {
+  var other = side === "over" ? "under" : "over";
+  var payload = {};
+  payload["ouUnits." + propId + "." + side + "." + pid] = count > 0 ? count : deleteField();
+  payload["ouUnits." + propId + "." + other + "." + pid] = deleteField();
+  return updateDoc(tripRef, payload).catch(function(err) {
+    console.error("O/U units save failed:", err);
+    throw err;
+  });
+}
+
 // ─── Chat messages (real-time collection) ────────────────
 const chatRef = collection(db, "trips", TRIP_ID, "chat");
 

@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, savePropUnits, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
+import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, savePropUnits, saveOuUnits, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "3.27";
+const APP_VERSION = "3.28";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 // Skins and Individual Gross Stableford were removed to simplify the bet menu.
@@ -264,7 +264,7 @@ function defaultState() {
     games: [],
     bets: DEFAULT_PROPS,
     individualProps: DEFAULT_INDIVIDUAL_PROPS,
-    overUnderProps: DEFAULT_OU_PROPS.map(function(p) { return Object.assign({}, p, { over: [], under: [] }); }),
+    overUnderProps: DEFAULT_OU_PROPS.map(function(p) { return Object.assign({}, p, { overUnits: {}, underUnits: {} }); }),
     customBets: [],
     h2hBets: [],
     teamMatches: [],
@@ -855,16 +855,24 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
   if (overUnderProps) {
     overUnderProps.forEach(function(p) {
       if (!p.settled || !p.result) return;
-      var over = p.over || [], under = p.under || [];
-      var winSide = p.result === "over" ? over : under;
+      var overU = p.overUnits || {}, underU = p.underUnits || {};
+      var overIds = Object.keys(overU).filter(function(id) { return (overU[id] || 0) >= 1; });
       // Disjoint the sides defensively (a player should never be on both).
-      var loseSide = (p.result === "over" ? under : over).filter(function(pid) { return winSide.indexOf(pid) < 0; });
-      if (winSide.length === 0 || loseSide.length === 0) return; // void — needs both sides
+      var underIds = Object.keys(underU).filter(function(id) { return (underU[id] || 0) >= 1 && overIds.indexOf(id) < 0; });
+      var winIds = p.result === "over" ? overIds : underIds;
+      var loseIds = p.result === "over" ? underIds : overIds;
+      if (winIds.length === 0 || loseIds.length === 0) return; // void — needs both sides
       var stake = p.stake || DEFAULT_BUYIN;
-      var loseTotal = loseSide.length * stake;
-      var winEach = loseTotal / winSide.length;
-      loseSide.forEach(function(pid) { balances[pid] = (balances[pid] || 0) - stake; });
-      winSide.forEach(function(pid) { balances[pid] = (balances[pid] || 0) + winEach; });
+      var winU = p.result === "over" ? overU : underU;
+      var loseU = p.result === "over" ? underU : overU;
+      var winUnits = winIds.reduce(function(s, id) { return s + (winU[id] || 1); }, 0);
+      var pot = loseIds.reduce(function(s, id) { return s + (loseU[id] || 1); }, 0) * stake;
+      // Multi-unit (parimutuel): each loser pays (their units × stake); that pot is split
+      // among the winning side in proportion to their units. A player's units scale both
+      // their stake and their share. Reduces to the old even split when everyone holds one
+      // unit, and every dollar paid is a dollar received, so it always sums to $0.
+      loseIds.forEach(function(id) { balances[id] = (balances[id] || 0) - (loseU[id] || 1) * stake; });
+      winIds.forEach(function(id) { balances[id] = (balances[id] || 0) + pot * (winU[id] || 1) / winUnits; });
     });
   }
 
@@ -1324,11 +1332,22 @@ export default function App() {
         if (!Array.isArray(merged.skinsEligible.net)) merged.skinsEligible.net = [];
         if (!Array.isArray(merged.skinsEligible.course)) merged.skinsEligible.course = [];
         while (merged.skinsEligible.course.length < COURSES.length) merged.skinsEligible.course.push([]);
-        // Over/Under props: ensure it's always an array; normalize each side to an array.
-        if (!Array.isArray(merged.overUnderProps)) merged.overUnderProps = DEFAULT_OU_PROPS.map(function(p) { return Object.assign({}, p, { over: [], under: [] }); });
+        // Over/Under props: definitions stay in the synced array; the per-player side &
+        // unit counts now live in a dedicated ouUnits map ({ propId: { over:{pid:n},
+        // under:{pid:n} } }) written one field at a time (clobber-proof, like the foursome
+        // backers). Derive each prop's overUnits/underUnits from the map; fall back to any
+        // legacy over/under arrays (1 unit each) so old data is never lost.
+        if (!Array.isArray(merged.overUnderProps)) merged.overUnderProps = DEFAULT_OU_PROPS.slice();
+        var ouMap = (merged.ouUnits && typeof merged.ouUnits === "object" && !Array.isArray(merged.ouUnits)) ? merged.ouUnits : {};
         merged.overUnderProps = merged.overUnderProps.map(function(p) {
-          return Object.assign({}, p, { over: Array.isArray(p.over) ? p.over : [], under: Array.isArray(p.under) ? p.under : [] });
+          var entry = (ouMap[p.id] && typeof ouMap[p.id] === "object") ? ouMap[p.id] : {};
+          var ov = Object.assign({}, (entry.over && typeof entry.over === "object") ? entry.over : {});
+          var un = Object.assign({}, (entry.under && typeof entry.under === "object") ? entry.under : {});
+          if (Object.keys(ov).length === 0 && Array.isArray(p.over)) p.over.forEach(function(id) { ov[id] = 1; });
+          if (Object.keys(un).length === 0 && Array.isArray(p.under)) p.under.forEach(function(id) { un[id] = 1; });
+          return Object.assign({}, p, { overUnits: ov, underUnits: un });
         });
+        merged.ouUnits = ouMap;
         // Seed/sync the foursome Stableford matches. The pairings are fixed in code.
         // Backers now live in a dedicated `foursomeBackers` map ({ matchId: {a,b} })
         // written atomically — never inside this array — so a full-document save can't
@@ -1624,6 +1643,24 @@ export default function App() {
       return Object.assign({}, prev, { propUnits: pu, individualProps: nip });
     });
   }, [setState]);
+  // Over/Under: optimistic local update to the ouUnits map (mirrored onto the prop's
+  // overUnits/underUnits for instant display); the durable, clobber-proof per-field write
+  // is done by saveOuUnits in the component. A player sits on one side only.
+  var setOuUnitsLocal = useCallback(function(propId, pid, side, count) {
+    setState(function(prev) {
+      var ou = Object.assign({}, prev.ouUnits || {});
+      var entry = ou[propId] || {};
+      var over = Object.assign({}, entry.over || {});
+      var under = Object.assign({}, entry.under || {});
+      delete over[pid]; delete under[pid];               // leave both, then re-add to chosen side
+      if (count > 0) { (side === "over" ? over : under)[pid] = count; }
+      ou[propId] = { over: over, under: under };
+      var noup = (prev.overUnderProps || []).map(function(x) {
+        return x.id === propId ? Object.assign({}, x, { overUnits: over, underUnits: under }) : x;
+      });
+      return Object.assign({}, prev, { ouUnits: ou, overUnderProps: noup });
+    });
+  }, [setState]);
 
   // then writes ONLY this player's/round's hole array to Firestore (field-path
   // write) instead of the whole scores map — see saveScorePath in firebase.js.
@@ -1819,7 +1856,7 @@ export default function App() {
             <div style={{fontSize:14, color:CL.muted, fontFamily:"system-ui", marginBottom:20}}>Sign in with the group passcode to view bets and games.</div>
             <button onClick={handleLogout} style={Object.assign({}, S.primaryBtn, {width:"auto", padding:"12px 32px"})}>Sign In</button>
           </div>
-        ) : <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} overUnderProps={state.overUnderProps || DEFAULT_OU_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} foursomeBackers={state.foursomeBackers || {}} onBack={backFoursomeLocal} onUnback={unbackFoursomeLocal} onSetPropUnits={setPropUnitsLocal} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} isGuest={isGuest} canEdit={canEditBets} skinsEligible={state.skinsEligible || {gross:[], net:[], course:[[],[],[],[],[]]}} />)}
+        ) : <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} overUnderProps={state.overUnderProps || DEFAULT_OU_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} foursomeBackers={state.foursomeBackers || {}} onBack={backFoursomeLocal} onUnback={unbackFoursomeLocal} onSetPropUnits={setPropUnitsLocal} onSetOuUnits={setOuUnitsLocal} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} isGuest={isGuest} canEdit={canEditBets} skinsEligible={state.skinsEligible || {gross:[], net:[], course:[[],[],[],[],[]]}} />)}
         {activeTab === "expenses" && (isGuest ? (
           <div style={{padding:"60px 24px", textAlign:"center"}}>
             <div style={{fontSize:48, marginBottom:16}}>🔒</div>
@@ -4060,47 +4097,49 @@ function BetsTab(props) {
           {/* Over/Under Props — two-sided side bets on a numeric line */}
           <div style={S.card}>
             <div style={S.cardTitle}>🎲 Over / Under Props</div>
-            <div style={Object.assign({}, S.label, {marginBottom:12})}>Two-sided bets on a number. Take the OVER or the UNDER — once it's settled, the losing side pays the winners, split evenly.</div>
+            <div style={Object.assign({}, S.label, {marginBottom:12})}>Two-sided bets on a number. Take the OVER or the UNDER — use − / + to take multiple units. Once settled, the losing side pays the winners, split by units.</div>
             {(function() {
               function firstName(id){ var pl=players.find(function(x){return x.id===id;}); return pl?pl.emoji+" "+pl.name.split(" ")[0]:id; }
-              function takeSide(propId, pid, side){
-                update({overUnderProps: overUnderProps.map(function(p){
-                  if(p.id!==propId) return p;
-                  var np=Object.assign({},p,{over:(p.over||[]).slice(),under:(p.under||[]).slice()});
-                  np.over=np.over.filter(function(id){return id!==pid;});
-                  np.under=np.under.filter(function(id){return id!==pid;});
-                  if(side==="over")np.over.push(pid); else np.under.push(pid);
-                  return np;
-                })});
-              }
-              function leaveOU(propId, pid){
-                update({overUnderProps: overUnderProps.map(function(p){
-                  if(p.id!==propId) return p;
-                  return Object.assign({},p,{over:(p.over||[]).filter(function(id){return id!==pid;}),under:(p.under||[]).filter(function(id){return id!==pid;})});
-                })});
+              // Atomic, clobber-proof: optimistic local update + per-field write. A player
+              // sits on exactly one side; setting a side clears the other. 0 units = off.
+              function setOu(propId, pid, side, n){
+                if(!props.canEdit) return;
+                var nv=Math.max(0,n);
+                props.onSetOuUnits(propId, pid, side, nv);
+                saveOuUnits(propId, pid, side, nv);
               }
               function settleOU(propId, result){ update({overUnderProps: overUnderProps.map(function(p){ return p.id===propId?Object.assign({},p,{settled:true,result:result}):p; })}); }
               function unsettleOU(propId){ update({overUnderProps: overUnderProps.map(function(p){ return p.id===propId?Object.assign({},p,{settled:false,result:null}):p; })}); }
               return overUnderProps.map(function(p){
-                var over=p.over||[], under=p.under||[];
-                var inAny=over.concat(under);
+                var overU=p.overUnits||{}, underU=p.underUnits||{};
+                var overIds=Object.keys(overU).filter(function(id){return (overU[id]||0)>=1;});
+                var underIds=Object.keys(underU).filter(function(id){return (underU[id]||0)>=1 && overIds.indexOf(id)<0;});
+                var inAny=overIds.concat(underIds);
                 var undecided=players.filter(function(pl){return inAny.indexOf(pl.id)<0;});
                 var stake=p.stake||DEFAULT_BUYIN;
-                var winSide = p.result==="over"?over:under;
-                var loseSide = (p.result==="over"?under:over).filter(function(id){return winSide.indexOf(id)<0;});
-                var voidBet = winSide.length===0||loseSide.length===0;
-                var winEach = (!voidBet)?(loseSide.length*stake)/winSide.length:0;
-                function sideBox(label, ids, color){
+                var overUnits=overIds.reduce(function(s,id){return s+(overU[id]||1);},0);
+                var underUnits=underIds.reduce(function(s,id){return s+(underU[id]||1);},0);
+                var winIds = p.result==="over"?overIds:underIds;
+                var loseIds = p.result==="over"?underIds:overIds;
+                var loseUnits = p.result==="over"?underUnits:overUnits;
+                var voidBet = winIds.length===0||loseIds.length===0;
+                var pot = (!voidBet)?loseUnits*stake:0;
+                function chip(id, side, umap){
+                  var cnt=umap[id]||0; var c = side==="over"?"#22c55e":CL.red;
+                  return <span key={id+side} style={Object.assign({},S.pillBtn,{background:side==="over"?"rgba(34,197,94,0.18)":"rgba(240,69,74,0.18)",borderColor:c,color:c,display:"inline-flex",alignItems:"center",gap:5,padding:"4px 7px",marginRight:4,marginBottom:4})}>
+                    {!p.settled && <span onClick={function(){setOu(p.id,id,side,cnt-1);}} style={{cursor:"pointer",fontWeight:700,fontSize:16,lineHeight:1,padding:"0 3px",opacity:props.canEdit?1:0.4}}>−</span>}
+                    <span style={{fontSize:12}}>{firstName(id)}</span>
+                    <span style={{fontSize:12,fontWeight:800}}>{"×"+cnt}</span>
+                    {!p.settled && <span onClick={function(){setOu(p.id,id,side,cnt+1);}} style={{cursor:"pointer",fontWeight:700,fontSize:16,lineHeight:1,padding:"0 3px",opacity:props.canEdit?1:0.4}}>+</span>}
+                  </span>;
+                }
+                function sideBox(label, ids, side, umap, color){
+                  var tot=ids.reduce(function(s,id){return s+(umap[id]||1);},0);
                   return (
                     <div style={Object.assign({},S.teamBox,{flex:1})}>
-                      <div style={{fontSize:12,fontWeight:700,color:color,fontFamily:"system-ui",marginBottom:4}}>{label+" ("+ids.length+")"}</div>
+                      <div style={{fontSize:12,fontWeight:700,color:color,fontFamily:"system-ui",marginBottom:6}}>{label+" · "+tot+(tot===1?" unit":" units")}</div>
                       {ids.length===0 && <div style={{fontSize:12,color:CL.muted,fontFamily:"system-ui"}}>—</div>}
-                      {ids.map(function(id){ return (
-                        <div key={id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:13,color:"#fff",fontFamily:"system-ui",marginBottom:2}}>
-                          <span>{firstName(id)}</span>
-                          {!p.settled && props.canEdit && <button onClick={function(){leaveOU(p.id,id);}} style={{background:"none",border:"none",color:CL.muted,cursor:"pointer",fontSize:11}}>✕</button>}
-                        </div>
-                      ); })}
+                      <div style={{display:"flex",flexWrap:"wrap"}}>{ids.map(function(id){return chip(id,side,umap);})}</div>
                     </div>
                   );
                 }
@@ -4109,34 +4148,34 @@ function BetsTab(props) {
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
                       <div style={{flex:1}}>
                         <div style={{fontSize:15,fontWeight:600,color:p.settled?CL.muted:"#fff",textDecoration:p.settled?"line-through":"none"}}>{p.name}</div>
-                        <div style={{fontSize:13,color:CL.blue,fontFamily:"system-ui",marginTop:2}}>{"Line: O / U "+p.line+"  ·  $"+stake+"/player"}</div>
+                        <div style={{fontSize:13,color:CL.blue,fontFamily:"system-ui",marginTop:2}}>{"Line: O / U "+p.line+"  ·  $"+stake+"/unit"}</div>
                       </div>
                       {!p.settled && props.canEdit && <button onClick={function(){ if(confirm("Delete this over/under?")) update({overUnderProps:overUnderProps.filter(function(x){return x.id!==p.id;})}); }} style={{background:"none",border:"none",color:CL.muted,cursor:"pointer",fontSize:14,flexShrink:0}}>🗑</button>}
                     </div>
                     <div style={{display:"flex",gap:8,marginTop:8}}>
-                      {sideBox("OVER "+p.line, over, "#22c55e")}
-                      {sideBox("UNDER "+p.line, under, CL.red)}
+                      {sideBox("OVER "+p.line, overIds, "over", overU, "#22c55e")}
+                      {sideBox("UNDER "+p.line, underIds, "under", underU, CL.red)}
                     </div>
                     {p.settled ? (
                       <div style={{marginTop:8}}>
-                        <div style={{fontSize:14,color:voidBet?CL.muted:"#22c55e",fontFamily:"system-ui"}}>{voidBet ? ("Settled "+(p.result==="over"?"OVER":"UNDER")+" — void (one side had no takers, no money moves)") : ("🏆 "+(p.result==="over"?"OVER":"UNDER")+" hit — each winner +$"+(Math.round(winEach*100)/100))}</div>
+                        <div style={{fontSize:14,color:voidBet?CL.muted:"#22c55e",fontFamily:"system-ui"}}>{voidBet ? ("Settled "+(p.result==="over"?"OVER":"UNDER")+" — void (one side had no takers, no money moves)") : ("🏆 "+(p.result==="over"?"OVER":"UNDER")+" hit — losing side pays $"+pot+", split among winners by units")}</div>
                         {props.canEdit && <button onClick={function(){unsettleOU(p.id);}} style={{marginTop:6,fontSize:11,color:CL.muted,fontFamily:"system-ui",background:"none",border:"1px solid "+CL.border,borderRadius:6,padding:"5px 12px",cursor:"pointer"}}>↩ Undo</button>}
                       </div>
                     ) : (
                       <div style={{marginTop:8}}>
                         {props.canEdit && undecided.length>0 && (
                           <div style={{marginBottom:8}}>
-                            <div style={{fontSize:11,color:CL.muted,fontFamily:"system-ui",marginBottom:4}}>Take a side:</div>
+                            <div style={{fontSize:11,color:CL.muted,fontFamily:"system-ui",marginBottom:4}}>Take a side (then − / + for more units):</div>
                             {undecided.map(function(pl){ return (
                               <div key={pl.id} style={{display:"flex",alignItems:"center",gap:6,marginBottom:5}}>
                                 <div style={{flex:1,fontSize:13,color:"#fff",fontFamily:"system-ui"}}>{pl.emoji+" "+pl.name}</div>
-                                <button onClick={function(){takeSide(p.id,pl.id,"over");}} style={Object.assign({},S.pillBtn,{fontSize:11,padding:"4px 10px",borderColor:"rgba(34,197,94,0.5)",color:"#22c55e"})}>Over</button>
-                                <button onClick={function(){takeSide(p.id,pl.id,"under");}} style={Object.assign({},S.pillBtn,{fontSize:11,padding:"4px 10px",borderColor:"rgba(240,69,74,0.5)",color:CL.red})}>Under</button>
+                                <button onClick={function(){setOu(p.id,pl.id,"over",1);}} style={Object.assign({},S.pillBtn,{fontSize:11,padding:"4px 10px",borderColor:"rgba(34,197,94,0.5)",color:"#22c55e"})}>Over</button>
+                                <button onClick={function(){setOu(p.id,pl.id,"under",1);}} style={Object.assign({},S.pillBtn,{fontSize:11,padding:"4px 10px",borderColor:"rgba(240,69,74,0.5)",color:CL.red})}>Under</button>
                               </div>
                             ); })}
                           </div>
                         )}
-                        {props.canEdit && (over.length>0||under.length>0) && (
+                        {props.canEdit && (overIds.length>0||underIds.length>0) && (
                           <div>
                             <div style={{fontSize:11,color:CL.muted,fontFamily:"system-ui",marginBottom:4}}>Settle — which way did it go?</div>
                             <div style={{display:"flex",gap:6}}>
