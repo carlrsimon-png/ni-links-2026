@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, savePropUnits, saveOuUnits, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "4.2";
+const APP_VERSION = "4.3";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 // Skins and Individual Gross Stableford were removed to simplify the bet menu.
@@ -2649,6 +2649,8 @@ function ScoresTab(props) {
   // Which scanned rows have been assigned (rowIndex -> playerId). Lets a single scan of a
   // multi-player card assign every row, instead of closing after the first one.
   var asg = useState({}); var assigned = asg[0], setAssigned = asg[1];
+  // Which players have the hole-by-hole gross/net/Stableford detail expanded (pid -> true).
+  var bd = useState({}); var breakdownOpen = bd[0], setBreakdownOpen = bd[1];
   // Handicap editor (relocated from Bets)
   var hceOpen = useState(false); var hcEditorOpen = hceOpen[0], setHcEditorOpen = hceOpen[1];
   var hceId = useState(null); var hcEditId = hceId[0], setHcEditId = hceId[1];
@@ -3009,6 +3011,70 @@ function ScoresTab(props) {
                 );
               })}
             </div>
+            {/* Hole-by-hole gross / net / Stableford — collapsible, to verify the points math */}
+            {gross !== null && (
+              <button onClick={function() { setBreakdownOpen(function(prev) { var n = Object.assign({}, prev); if (n[player.id]) delete n[player.id]; else n[player.id] = true; return n; }); }} style={{marginTop:8, fontSize:11, color:CL.blue, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:6, padding:"5px 10px", cursor:"pointer"}}>{breakdownOpen[player.id] ? "\u25be Hide hole-by-hole" : "\u25b8 Hole-by-hole gross / net / Stableford"}</button>
+            )}
+            {breakdownOpen[player.id] && (
+              <div style={{marginTop:8, paddingTop:8, borderTop:"1px solid "+CL.border}}>
+                <div style={{fontSize:9, color:CL.muted, fontFamily:"system-ui", fontWeight:700, marginBottom:6, letterSpacing:0.5}}>{"HOLE-BY-HOLE \u00b7 "+COURSE_LABELS[sel]}</div>
+                {[0,1].map(function(nine) {
+                  var s = nine*9;
+                  var holes = [], pars = [], gs = [], ns = [], ps = [];
+                  var gT=0, nT=0, pT=0, parT=0, anyG=false;
+                  for (var k=0; k<9; k++) {
+                    var hh = s+k;
+                    var par = course.pars ? course.pars[hh] : 0;
+                    var hsi = course.si ? course.si[hh] : 99;
+                    var str = strokesOnHole(ch, hsi);
+                    var g = scores[player.id] && scores[player.id][sel] && scores[player.id][sel][hh];
+                    holes.push({ n: hh+1, stroke: str>0 });
+                    pars.push(par); parT += par;
+                    if (g != null) {
+                      anyG = true;
+                      var nv = g - str;
+                      var pt = stablefordPointsForHole(g, par, ch, hsi);
+                      gs.push(g); ns.push(nv); ps.push(pt);
+                      gT += g; nT += nv; pT += pt;
+                    } else { gs.push("\u00b7"); ns.push("\u00b7"); ps.push("\u00b7"); }
+                  }
+                  var col = {display:"grid", gridTemplateColumns:"32px repeat(9,1fr) 30px", gap:2, marginBottom:2, alignItems:"center"};
+                  function cellSty(c, bold) { return {textAlign:"center", fontSize:11, fontFamily:"system-ui", color:c||"#fff", fontWeight:bold?800:400}; }
+                  return (
+                    <div key={nine} style={{marginBottom:8, overflowX:"auto"}}>
+                      <div style={{minWidth:330}}>
+                        <div style={col}>
+                          <div style={{fontSize:8, color:CL.muted, fontFamily:"system-ui", fontWeight:700}}>HOLE</div>
+                          {holes.map(function(h,i){ return <div key={i} style={{textAlign:"center", fontSize:9, color:h.stroke?CL.blue:CL.muted, fontFamily:"system-ui", fontWeight:700}}>{(h.stroke?"\u25cf":"")+h.n}</div>; })}
+                          <div style={{textAlign:"center", fontSize:8, color:CL.muted, fontFamily:"system-ui", fontWeight:700}}>{nine===0?"OUT":"IN"}</div>
+                        </div>
+                        <div style={col}>
+                          <div style={{fontSize:8, color:CL.muted, fontFamily:"system-ui"}}>Par</div>
+                          {pars.map(function(p,i){ return <div key={i} style={{textAlign:"center", fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>{p}</div>; })}
+                          <div style={{textAlign:"center", fontSize:10, color:CL.muted, fontFamily:"system-ui", fontWeight:700}}>{parT}</div>
+                        </div>
+                        <div style={col}>
+                          <div style={{fontSize:8, color:"#fff", fontFamily:"system-ui", fontWeight:700}}>Gross</div>
+                          {gs.map(function(v,i){ return <div key={i} style={cellSty("#fff")}>{v}</div>; })}
+                          <div style={cellSty("#fff", true)}>{anyG?gT:"\u2014"}</div>
+                        </div>
+                        <div style={col}>
+                          <div style={{fontSize:8, color:CL.red, fontFamily:"system-ui", fontWeight:700}}>Net</div>
+                          {ns.map(function(v,i){ return <div key={i} style={cellSty(CL.red)}>{v}</div>; })}
+                          <div style={cellSty(CL.red, true)}>{anyG?nT:"\u2014"}</div>
+                        </div>
+                        <div style={col}>
+                          <div style={{fontSize:8, color:"#22c55e", fontFamily:"system-ui", fontWeight:700}}>Pts</div>
+                          {ps.map(function(v,i){ return <div key={i} style={cellSty("#22c55e")}>{v}</div>; })}
+                          <div style={cellSty("#22c55e", true)}>{anyG?pT:"\u2014"}</div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+                <div style={{fontSize:9, color:CL.muted, fontFamily:"system-ui", marginTop:2, lineHeight:1.4}}>{"\u25cf = handicap stroke on that hole. Net = gross \u2212 strokes. Points: net albatross+ 5, eagle 4, birdie 3, par 2, bogey 1, double+ 0."}</div>
+              </div>
+            )}
             {/* Stableford by round (net) — this player's points per course + trip total */}
             <div style={{marginTop:8, paddingTop:8, borderTop:"1px solid "+CL.border}}>
               <div style={{fontSize:9, color:CL.muted, fontFamily:"system-ui", fontWeight:700, marginBottom:4, letterSpacing:0.5}}>STABLEFORD BY ROUND (NET)</div>
