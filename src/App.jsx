@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, savePropUnits, saveOuUnits, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "4.6";
+const APP_VERSION = "4.7";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 // Skins and Individual Gross Stableford were removed to simplify the bet menu.
@@ -17,8 +17,10 @@ const AUTH_KEY = "ni-links-auth";
 // returns you to it instead of dropping back to Home. Never synced across devices.
 const TAB_KEY = "ni-links-active-tab";
 const GROUP_PIN = "2026";
-// Only these players (Brian Smith, Carl Simon) can edit Bets & Expenses — the "gatekeepers" of the books.
+// Brian Smith & Carl Simon are the "gatekeepers" of the books (expenses).
 const BOOKKEEPER_IDS = ["p2", "p6"];
+// Only Carl can place, change, settle, or pick winners on any bet (everyone else is view-only on Bets).
+const OWNER_ID = "p6";
 
 // ── Wager amounts ──────────────────────────────────────────────────────────
 // Single source of truth for every stake. Both the money math AND the on-screen
@@ -271,6 +273,9 @@ function defaultState() {
     teamMatches: [],
     foursomeMatches: DEFAULT_FOURSOME_MATCHES.map(function(m) { return Object.assign({}, m, { backersA: m.backersA.slice(), backersB: m.backersB.slice() }); }),
     foursomeBackers: {},
+    // Carl-only manual winner overrides. team: "a"|"b"|null (Publics/Brunswick); foursome:
+    // { matchId: "A"|"B" }. When set, overrides the auto-computed result for settlement.
+    manualWinners: { team: null, foursome: {} },
     drinks: {},
     expenses: [],
     selectedTees: [0, 0, 0, 0, 0],
@@ -761,7 +766,10 @@ function matchOu(overUnits, underUnits, overTimes, underTimes) {
   return { overMatched: alloc(overUnits, overTimes), underMatched: alloc(underUnits, underTimes), matched: M, overTotal: overTot, underTotal: underTot };
 }
 
-function computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches, overUnderProps) {
+function computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches, overUnderProps, manualWinners) {
+  var mWins = manualWinners || {};
+  var mwTeam = mWins.team || null;            // "a" | "b" | null
+  var mwFour = mWins.foursome || {};          // { matchId: "A" | "B" }
   var balances = {};
   players.forEach(function(p) { balances[p.id] = 0; });
 
@@ -841,17 +849,20 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
       var pairA = m.pairA || [], pairB = m.pairB || [];
       var core = pairA.concat(pairB);
       if (core.length === 0) return;
-      // Only final & countable once every core player has all 18 holes in.
-      if (!roundComplete(scores, ri, core)) return;
-      // Decide the winning side by this course's format. Ardglass = best-ball net Stableford
-      // AGGREGATE (higher total wins). RCD onward = best-ball MATCH PLAY (more holes won wins;
-      // all square pushes — no money). aWins=true => pairA took it, false => pairB.
+      // Decide the winning side. A Carl-set manual winner overrides everything. Otherwise:
+      // Ardglass = best-ball net Stableford AGGREGATE (higher total wins); RCD onward =
+      // best-ball MATCH PLAY (more holes won wins; all square pushes). aWins true=>pairA.
       var aWins;
-      if (foursomeIsMatchPlay(ri)) {
+      var mw = mwFour[m.id];
+      if (mw === "A" || mw === "B") {
+        aWins = mw === "A"; // manual override — wins regardless of scores/completion
+      } else if (foursomeIsMatchPlay(ri)) {
+        if (!roundComplete(scores, ri, core)) return;
         var mp = foursomeMatchPlay(scores, players, pairA, pairB, ri);
         if (!mp || mp.aHoles === mp.bHoles) return; // all square / no result → push, no money
         aWins = mp.aHoles > mp.bHoles;
       } else {
+        if (!roundComplete(scores, ri, core)) return;
         var aPts = getTeamRoundBestBall(scores, players, pairA, ri);
         var bPts = getTeamRoundBestBall(scores, players, pairB, ri);
         if (aPts === null || bPts === null || aPts === bPts) return; // tie/incomplete → no money
@@ -943,8 +954,17 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
     var tsB = resolveTeam(tsMatchup.teamB, players);
     var tsTotA = getTeamTotalBestBall(scores, players, tsA);
     var tsTotB = getTeamTotalBestBall(scores, players, tsB);
-    if ((tsTotA > 0 || tsTotB > 0) && tsTotA !== tsTotB && tsA.length > 0 && tsB.length > 0) {
-      var TS_STAKE = STAKE_TEAM;
+    var TS_STAKE = STAKE_TEAM;
+    if (mwTeam === "a" || mwTeam === "b") {
+      // Carl-set manual winner overrides the auto best-ball result.
+      var tsWinM = mwTeam === "a" ? tsA : tsB;
+      var tsLoseM = mwTeam === "a" ? tsB : tsA;
+      if (tsWinM.length > 0 && tsLoseM.length > 0) {
+        var tsWinEachM = (TS_STAKE * tsLoseM.length) / tsWinM.length;
+        tsLoseM.forEach(function(pid) { balances[pid] = (balances[pid] || 0) - TS_STAKE; });
+        tsWinM.forEach(function(pid) { balances[pid] = (balances[pid] || 0) + tsWinEachM; });
+      }
+    } else if ((tsTotA > 0 || tsTotB > 0) && tsTotA !== tsTotB && tsA.length > 0 && tsB.length > 0) {
       var tsWinIds = tsTotA > tsTotB ? tsA : tsB;
       var tsLoseIds = tsTotA > tsTotB ? tsB : tsA;
       var tsWinEach = (TS_STAKE * tsLoseIds.length) / tsWinIds.length;
@@ -1059,8 +1079,8 @@ function roundBalances(balances, players) {
 }
 
 // Greedy min-cash-flow: turn net balances into a short list of who-pays-whom.
-function calculateSettleUp(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches, overUnderProps) {
-  var raw = computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches, overUnderProps);
+function calculateSettleUp(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches, overUnderProps, manualWinners) {
+  var raw = computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches, overUnderProps, manualWinners);
   var balances = roundBalances(raw, players); // whole-dollar, still sums to $0
   var creditors = [];
   var debtors = [];
@@ -1633,7 +1653,7 @@ export default function App() {
       // for the same clobber class the foursome backers hit. (Scores go through
       // saveScorePath; foursome backers through atomic map writes — both excluded here.)
       if (!isGuestWrite) {
-        var SYNCED_FIELDS = ["players", "games", "bets", "individualProps", "overUnderProps", "h2hBets", "teamMatches", "foursomeMatches", "drinks", "expenses", "selectedTees", "skinsEligible", "courseOverrides"];
+        var SYNCED_FIELDS = ["players", "games", "bets", "individualProps", "overUnderProps", "h2hBets", "teamMatches", "foursomeMatches", "drinks", "expenses", "selectedTees", "skinsEligible", "courseOverrides", "manualWinners"];
         var changedToSave = SYNCED_FIELDS.filter(function(f) { return Object.prototype.hasOwnProperty.call(changes, f); });
         if (changedToSave.length) {
           changedToSave.forEach(function(f) { pendingSave.current[f] = next[f]; });
@@ -1853,7 +1873,7 @@ export default function App() {
   var canEditBooks = !isGuest && BOOKKEEPER_IDS.indexOf(auth.playerId) >= 0;
   var booksReadOnly = !canEditBooks;
   // Any signed-in player can now manage bets (expenses stay gatekeeper-only).
-  var canEditBets = !isGuest;
+  var canEditBets = !isGuest && auth.playerId === OWNER_ID;
 
   var TABS = [
     { id:"home", icon:"🏠", label:"Home" },
@@ -1921,7 +1941,7 @@ export default function App() {
             <div style={{fontSize:14, color:CL.muted, fontFamily:"system-ui", marginBottom:20}}>Sign in with the group passcode to view bets and games.</div>
             <button onClick={handleLogout} style={Object.assign({}, S.primaryBtn, {width:"auto", padding:"12px 32px"})}>Sign In</button>
           </div>
-        ) : <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} overUnderProps={state.overUnderProps || DEFAULT_OU_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} foursomeBackers={state.foursomeBackers || {}} onBack={backFoursomeLocal} onUnback={unbackFoursomeLocal} onSetPropUnits={setPropUnitsLocal} onSetOuUnits={setOuUnitsLocal} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} isGuest={isGuest} canEdit={canEditBets} skinsEligible={state.skinsEligible || {gross:[], net:[], course:[[],[],[],[],[]]}} />)}
+        ) : <BetsTab players={players} scores={scores} games={games} bets={bets} individualProps={state.individualProps || DEFAULT_INDIVIDUAL_PROPS} overUnderProps={state.overUnderProps || DEFAULT_OU_PROPS} customBets={customBets} h2hBets={state.h2hBets} teamMatches={state.teamMatches || DEFAULT_TEAM_MATCHES} foursomeBackers={state.foursomeBackers || {}} onBack={backFoursomeLocal} onUnback={unbackFoursomeLocal} onSetPropUnits={setPropUnitsLocal} onSetOuUnits={setOuUnitsLocal} expenses={state.expenses || []} drinks={drinks} addingGame={addingGame} update={update} resetAll={resetAll} isGuest={isGuest} canEdit={canEditBets} skinsEligible={state.skinsEligible || {gross:[], net:[], course:[[],[],[],[],[]]}} manualWinners={state.manualWinners || {team:null, foursome:{}}} />)}
         {activeTab === "expenses" && (isGuest ? (
           <div style={{padding:"60px 24px", textAlign:"center"}}>
             <div style={{fontSize:48, marginBottom:16}}>🔒</div>
@@ -3506,6 +3526,7 @@ function StatusTag(props) {
 }
 function BetsTab(props) {
   var players = props.players, games = props.games, bets = props.bets;
+  var manualWinners = useMemo(function() { return props.manualWinners || { team: null, foursome: {} }; }, [props.manualWinners]);
   var drinks = props.drinks || {};
   // Stabilize defaulted props so the netBalances memo below isn't recomputed
   // every render: a bare `props.x || []` would hand back a fresh array/object
@@ -3522,6 +3543,19 @@ function BetsTab(props) {
   var overUnderProps = useMemo(function() { return props.overUnderProps || DEFAULT_OU_PROPS; }, [props.overUnderProps]);
   var individualProps = props.individualProps || DEFAULT_INDIVIDUAL_PROPS;
   var addingGame = props.addingGame, update = props.update, resetAll = props.resetAll;
+  // Carl-only manual winner overrides (write the synced manualWinners field).
+  function setFoursomeWinner(matchId, val) {
+    if (!props.canEdit) return;
+    var mw = manualWinners || { team:null, foursome:{} };
+    var fo = Object.assign({}, mw.foursome || {});
+    if (val) fo[matchId] = val; else delete fo[matchId];
+    update({ manualWinners: Object.assign({}, mw, { foursome: fo }) });
+  }
+  function setTeamWinner(val) {
+    if (!props.canEdit) return;
+    var mw = manualWinners || { team:null, foursome:{} };
+    update({ manualWinners: Object.assign({}, mw, { team: val }) });
+  }
 
   // Whole-trip completion: score-derived money (Team & Individual Stableford, the
   // trip-total skins) is final once every player has all 18 holes on all 5 rounds.
@@ -3565,15 +3599,15 @@ function BetsTab(props) {
   // per player on every render (the Bets tab renders this for all 8 players).
   var netBalances = useMemo(function() {
     return roundBalances(
-      computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches, overUnderProps),
+      computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches, overUnderProps, manualWinners),
       players
     );
-  }, [players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches, overUnderProps]);
+  }, [players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches, overUnderProps, manualWinners]);
 
   // All-bets net EXCLUDING expenses — same engine as Settle Up, expenses zeroed.
   var betsAll = useMemo(function() {
-    return computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, [], scores, skinsEligible, foursomeMatches, overUnderProps);
-  }, [players, games, bets, h2hBets, teamMatches, individualProps, scores, skinsEligible, foursomeMatches, overUnderProps]);
+    return computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, [], scores, skinsEligible, foursomeMatches, overUnderProps, manualWinners);
+  }, [players, games, bets, h2hBets, teamMatches, individualProps, scores, skinsEligible, foursomeMatches, overUnderProps, manualWinners]);
 
   // Net for ONE section = (all bets) − (all bets with that section removed). The
   // always-on score competitions cancel in the subtraction, leaving exactly that
@@ -3584,7 +3618,7 @@ function BetsTab(props) {
     var ou = remove === "props" ? [] : overUnderProps;
     var hh = remove === "h2h" ? [] : h2hBets;
     var gm = remove === "games" ? [] : games;
-    var without = computeBalances(players, gm, bets, hh, teamMatches, ip, [], scores, skinsEligible, foursomeMatches, ou);
+    var without = computeBalances(players, gm, bets, hh, teamMatches, ip, [], scores, skinsEligible, foursomeMatches, ou, manualWinners);
     var out = {};
     players.forEach(function(p) { out[p.id] = (betsAll[p.id] || 0) - (without[p.id] || 0); });
     return out;
@@ -3651,7 +3685,8 @@ function BetsTab(props) {
   return (
     <div>
       <div style={S.pageHeader}><div style={S.pageTitle}>Bets & Games</div></div>
-      {props.isGuest && <div style={{margin:"0 16px 8px", padding:"8px 12px", background:"rgba(111,172,255,0.1)", border:"1px solid "+CL.border, borderRadius:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>👁️ You're viewing as a guest. Sign in as a player to place and settle bets.</div>}
+      {props.isGuest && <div style={{margin:"0 16px 8px", padding:"8px 12px", background:"rgba(111,172,255,0.1)", border:"1px solid "+CL.border, borderRadius:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>👁️ You're viewing as a guest. Only Carl can place and settle bets.</div>}
+      {!props.isGuest && !props.canEdit && <div style={{margin:"0 16px 8px", padding:"8px 12px", background:"rgba(111,172,255,0.1)", border:"1px solid "+CL.border, borderRadius:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>👁️ Bets are view-only — only Carl can place or change bets.</div>}
 
       {/* Collapsible "How the Bets Work" reference card — teams & brackets pulled live
           so it stays accurate if a handicap is edited. Collapsed by default. */}
@@ -3737,7 +3772,8 @@ function BetsTab(props) {
         var bIds = resolveTeam(matchup.teamB, players);
         var aTotal = getTeamTotalBestBall(scores, players, aIds);
         var bTotal = getTeamTotalBestBall(scores, players, bIds);
-        var aLead = aTotal > bTotal, bLead = bTotal > aTotal;
+        var tOv = manualWinners.team; // "a" | "b" | null (Carl override)
+        var aLead = tOv ? tOv === "a" : aTotal > bTotal, bLead = tOv ? tOv === "b" : bTotal > aTotal;
         var indiv = players.map(function(p) {
           return { p:p, pts:getTotalStableford(scores, p.id, p.handicap) };
         }).filter(function(x) { return x.pts !== null; });
@@ -3768,6 +3804,15 @@ function BetsTab(props) {
                 {aTotal===bTotal ? "All square" : (aLead?matchup.teamA.name:matchup.teamB.name)+" lead by "+Math.abs(aTotal-bTotal)}
               </div>}
               {!anyScores && <div style={{textAlign:"center", marginTop:12, fontSize:13, color:CL.muted, fontFamily:"system-ui"}}>Enter scores to start the competition.</div>}
+              {tOv && <div style={{textAlign:"center", marginTop:6, fontSize:10, color:"#e879c9", fontFamily:"system-ui"}}>Winner set manually — overrides points</div>}
+              {props.canEdit && (
+                <div style={{marginTop:10, display:"flex", gap:6, alignItems:"center", flexWrap:"wrap", justifyContent:"center"}}>
+                  <span style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>Set winner:</span>
+                  <button onClick={function(){ setTeamWinner(tOv==="a"?null:"a"); }} style={Object.assign({},S.pillBtn,{fontSize:11,padding:"4px 10px"}, tOv==="a"?{borderColor:"#22c55e",color:"#22c55e"}:{})}>{matchup.teamA.name}</button>
+                  <button onClick={function(){ setTeamWinner(tOv==="b"?null:"b"); }} style={Object.assign({},S.pillBtn,{fontSize:11,padding:"4px 10px"}, tOv==="b"?{borderColor:"#22c55e",color:"#22c55e"}:{})}>{matchup.teamB.name}</button>
+                  {tOv && <button onClick={function(){ setTeamWinner(null); }} style={{fontSize:10,color:CL.muted,fontFamily:"system-ui",background:"none",border:"none",cursor:"pointer",textDecoration:"underline"}}>↩ Auto</button>}
+                </div>
+              )}
             </div>
 
             {/* Per-round team breakdown */}
@@ -3844,11 +3889,12 @@ function BetsTab(props) {
                           var mpRes = isMP ? foursomeMatchPlay(scores, players, m.pairA, m.pairB, ri) : null;
                           var aPts = pairLive(m.pairA, ri), bPts = pairLive(m.pairB, ri); // Stableford points (Ardglass)
                           var aHoles = mpRes ? mpRes.aHoles : 0, bHoles = mpRes ? mpRes.bHoles : 0;
-                          var started = isMP ? !!(mpRes && (aHoles + bHoles + mpRes.halved) > 0) : (aPts !== null || bPts !== null);
-                          var decided = isMP ? (roundFinal && mpRes && aHoles !== bHoles)
-                                             : (roundFinal && aPts !== null && bPts !== null && aPts !== bPts);
-                          var aWin = decided && (isMP ? aHoles > bHoles : aPts > bPts);
-                          var bWin = decided && (isMP ? bHoles > aHoles : bPts > aPts);
+                          var fOv = (manualWinners.foursome || {})[m.id]; // "A" | "B" | undefined (Carl override)
+                          var started = !!fOv || (isMP ? !!(mpRes && (aHoles + bHoles + mpRes.halved) > 0) : (aPts !== null || bPts !== null));
+                          var decided = fOv ? true : (isMP ? (roundFinal && mpRes && aHoles !== bHoles)
+                                             : (roundFinal && aPts !== null && bPts !== null && aPts !== bPts));
+                          var aWin = fOv ? fOv === "A" : (decided && (isMP ? aHoles > bHoles : aPts > bPts));
+                          var bWin = fOv ? fOv === "B" : (decided && (isMP ? bHoles > aHoles : bPts > aPts));
                           var bckA = (m.backersA||[]).filter(function(id){ return core.indexOf(id)<0 && (m.backersB||[]).indexOf(id)<0; });
                           var bckB = (m.backersB||[]).filter(function(id){ return core.indexOf(id)<0 && (m.backersA||[]).indexOf(id)<0; });
                           var winCore = aWin ? m.pairA : m.pairB, loseCore = aWin ? m.pairB : m.pairA;
@@ -3895,6 +3941,15 @@ function BetsTab(props) {
                                   : ((aPts||0)===(bPts||0)?"all square":((aPts||0)>(bPts||0)?"Side A":"Side B")+" up "+Math.abs((aPts||0)-(bPts||0))))}</div>
                               ) : (
                                 <div style={{textAlign:"center", marginTop:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>Not started</div>
+                              )}
+                              {fOv && <div style={{textAlign:"center", marginTop:4, fontSize:10, color:"#e879c9", fontFamily:"system-ui"}}>Winner set manually — overrides scores</div>}
+                              {props.canEdit && (
+                                <div style={{marginTop:8, display:"flex", gap:6, alignItems:"center", flexWrap:"wrap", justifyContent:"center"}}>
+                                  <span style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>Set winner:</span>
+                                  <button onClick={function(){ setFoursomeWinner(m.id, fOv==="A"?null:"A"); }} style={Object.assign({},S.pillBtn,{fontSize:11,padding:"4px 9px"}, fOv==="A"?{borderColor:"#22c55e",color:"#22c55e"}:{})}>{fName(m.pairA[0]).split(" ")[0]+" & "+fName(m.pairA[1]).split(" ")[0]}</button>
+                                  <button onClick={function(){ setFoursomeWinner(m.id, fOv==="B"?null:"B"); }} style={Object.assign({},S.pillBtn,{fontSize:11,padding:"4px 9px"}, fOv==="B"?{borderColor:"#22c55e",color:"#22c55e"}:{})}>{fName(m.pairB[0]).split(" ")[0]+" & "+fName(m.pairB[1]).split(" ")[0]}</button>
+                                  {fOv && <button onClick={function(){ setFoursomeWinner(m.id, null); }} style={{fontSize:10,color:CL.muted,fontFamily:"system-ui",background:"none",border:"none",cursor:"pointer",textDecoration:"underline"}}>↩ Auto</button>}
+                                </div>
                               )}
 
                               {started && (
@@ -4839,7 +4894,7 @@ function BetsTab(props) {
             <div style={S.cardTitle}>💸 Settle Up</div>
             <div style={Object.assign({}, S.label, {marginBottom:12})}>Who owes who across every bet, game, and expense</div>
             {(function() {
-              var transfers = calculateSettleUp(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches, overUnderProps);
+              var transfers = calculateSettleUp(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches, overUnderProps, manualWinners);
               if (transfers.length === 0) return (
                 <div style={{textAlign:"center", padding:20, color:CL.muted, fontFamily:"system-ui", fontSize:14}}>
                   Everyone's even — nothing to settle yet.
