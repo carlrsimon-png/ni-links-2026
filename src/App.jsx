@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, savePropUnits, saveOuUnits, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "4.3";
+const APP_VERSION = "4.4";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 // Skins and Individual Gross Stableford were removed to simplify the bet menu.
@@ -160,8 +160,9 @@ const DEFAULT_TEAM_MATCHES = [
 
 // Foursome Stableford matches — two 2-v-2 matches per course (the eight players
 // split into two foursomes; within each, the pairs play a Stableford match).
-// A pair's score is the COMBINED net Stableford of its two core players for that
-// round; the higher pair total wins. The winner is computed LIVE from scores —
+// A pair's score is the BEST-BALL net Stableford of its two core players (on each
+// hole only the pair's single best ball counts) for that round; the higher pair total
+// wins. The winner is computed LIVE from scores —
 // there's no manual settle. Outside players (the other four) can back either
 // side ("open pool"): everyone on the losing side pays the stake, and that pot
 // is split evenly across everyone on the winning side. Conserves to $0 for any
@@ -806,15 +807,11 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
       // Only final & countable once every core player has all 18 holes in.
       if (!roundComplete(scores, ri, core)) return;
       function pairPts(ids) {
-        var t = 0;
-        for (var i = 0; i < ids.length; i++) {
-          var pl = players.find(function(x) { return x.id === ids[i]; });
-          if (!pl) return null;
-          var pts = getRoundStableford(scores, ids[i], ri, pl.handicap);
-          if (pts === null) return null;
-          t += pts;
-        }
-        return t;
+        // Best-ball net Stableford: on each hole only the pair's single best ball counts —
+        // the low NET score (the player's handicap stroke applied on that hole), scored
+        // Stableford. The lowest net ball is exactly the ball worth the most Stableford
+        // points, so this equals taking the pair's best points each hole.
+        return getTeamRoundBestBall(scores, players, ids, ri);
       }
       var aPts = pairPts(pairA), bPts = pairPts(pairB);
       if (aPts === null || bPts === null || aPts === bPts) return; // tie/incomplete → no money
@@ -3642,7 +3639,7 @@ function BetsTab(props) {
                 {H("🤖 AUTOMATIC — YOU'RE ALREADY IN, SCORED BY THE APP")}
                 {Row("Team Stableford", "$100/man", "Public ("+pub+") vs Private ("+priv+"). Best-ball net Stableford over all 5 rounds (best ball each hole) — the winning four each collect $100.")}
                 {SHOW_GROSS && Row("Gross Brackets", "$50/man, winner-take-all", "Gross Stableford for the whole trip, split by handicap.  ⛰️ The Mournes: "+mournes+".  🌊 The Causeway: "+causeway+".")}
-                {Row("Foursome Matches", "$"+STAKE_FOURSOME+"/man", "Two 2-v-2 matches each course — your pair's combined net Stableford vs the other pair. You're auto-entered in your own match every round.")}
+                {Row("Foursome Matches", "$"+STAKE_FOURSOME+"/man", "Two 2-v-2 matches each course — your pair's best-ball net Stableford (only the best ball on each hole counts) vs the other pair. You're auto-entered in your own match every round.")}
                 {H("✋ OPT IN — TAP TO JOIN (in the tabs above)")}
                 {SHOW_SKINS && Row("Skins", "$"+STAKE_SKIN+"/skin, net", "Five per-course games plus trip-long gross & net pots. Join whichever you want on the 🔪 Skins tab.")}
                 {Row("Individual Props", "$"+DEFAULT_BUYIN+" each, winner-take-all", "Most Net Stableford (whole trip + each of the 5 courses) and Lowest Net Score (trip). Pick your spots on the 🎯 Props tab.")}
@@ -3764,14 +3761,10 @@ function BetsTab(props) {
             {(function() {
               function fName(pid) { var p = players.find(function(x){return x.id===pid;}); return p ? p.emoji+" "+p.name.split(" ")[0] : pid; }
               function pairLive(ids, ri) {
-                var t = 0, any = false;
-                ids.forEach(function(pid) {
-                  var pl = players.find(function(x){return x.id===pid;});
-                  if (!pl) return;
-                  var r = getRoundStableford(scores, pid, ri, pl.handicap);
-                  if (r !== null) { t += r; any = true; }
-                });
-                return any ? t : null;
+                // Best-ball net Stableford per hole — only the pair's single best ball counts
+                // on each hole (the low net score, scored Stableford), not both partners added
+                // together. Same engine the settlement uses, so the card matches the money.
+                return getTeamRoundBestBall(scores, players, ids, ri);
               }
               // Backers are written ATOMICALLY to their own map (clobber-proof) and
               // mirrored into local state for an instant UI response. We deliberately
@@ -3792,7 +3785,7 @@ function BetsTab(props) {
               return (
                 <div style={S.card}>
                   <div style={S.cardTitle}>👥 Foursome Matches</div>
-                  <div style={Object.assign({}, S.label, {marginBottom:4})}>Two 2-v-2 Stableford matches per course. Each pair's score is the combined net Stableford of its two players — higher total wins. Resolves automatically from scores.</div>
+                  <div style={Object.assign({}, S.label, {marginBottom:4})}>Two 2-v-2 Stableford matches per course. Each pair's score is best-ball net Stableford — on each hole only the pair's single best ball counts — higher total wins. Resolves automatically from scores.</div>
                   <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginBottom:10, fontWeight:600}}>{"$"+STAKE_FOURSOME+"/man · open pool — anyone can back a side; the losing side pays the winners, split evenly"}</div>
                   {COURSES.map(function(c, ri) {
                     var ms = foursomeMatches.filter(function(m){return m.courseIdx===ri;});
