@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, savePropUnits, saveOuUnits, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "4.4";
+const APP_VERSION = "4.5";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 // Skins and Individual Gross Stableford were removed to simplify the bet menu.
@@ -3491,6 +3491,8 @@ function BetsTab(props) {
   var sks = useState("5"); var stake = sks[0], setStake = sks[1];
   var rds = useState(0); var round = rds[0], setRound = rds[1];
   var res = useState({}); var results = res[0], setResults = res[1];
+  // Which foursome matches have their hole-by-hole best-ball breakdown expanded (matchId -> true).
+  var mhb = useState({}); var matchDetail = mhb[0], setMatchDetail = mhb[1];
   var nsAst = useState([]); var nsA = nsAst[0], setNsA = nsAst[1];
   var nsBst = useState([]); var nsB = nsBst[0], setNsB = nsBst[1];
   var nsFst = useState("10"); var nsFront = nsFst[0], setNsFront = nsFst[1];
@@ -3841,6 +3843,61 @@ function BetsTab(props) {
                               ) : (
                                 <div style={{textAlign:"center", marginTop:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>Not started</div>
                               )}
+
+                              {(aPts!==null||bPts!==null) && (
+                                <button onClick={function(){ setMatchDetail(function(prev){ var n=Object.assign({},prev); if(n[m.id]) delete n[m.id]; else n[m.id]=true; return n; }); }} style={{marginTop:8, fontSize:11, color:CL.blue, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:6, padding:"5px 10px", cursor:"pointer"}}>{matchDetail[m.id] ? "\u25be Hide hole-by-hole" : "\u25b8 Hole-by-hole best ball"}</button>
+                              )}
+                              {matchDetail[m.id] && (function() {
+                                var course = COURSES[ri];
+                                function pPts(pid, h) { var pl = players.find(function(x){return x.id===pid;}); if (!pl) return null; var g = scores[pid] && scores[pid][ri] && scores[pid][ri][h]; if (g == null) return null; return stablefordPointsForHole(g, course.pars[h], getCourseHandicap(pl.handicap, ri), course.si[h]); }
+                                function PairTable(pairIds, label) {
+                                  return (
+                                    <div style={{marginBottom:8}}>
+                                      <div style={{fontSize:10, color:"#fff", fontFamily:"system-ui", fontWeight:700, marginBottom:3}}>{label}</div>
+                                      {[0,1].map(function(nine) {
+                                        var s = nine*9;
+                                        var col = {display:"grid", gridTemplateColumns:"36px repeat(9,1fr) 28px", gap:2, marginBottom:2, alignItems:"center"};
+                                        var bestCells = [], bestSum = 0, anyB = false;
+                                        for (var k=0;k<9;k++) { var hh=s+k; var best=null; pairIds.forEach(function(pid){ var pt=pPts(pid,hh); if(pt!==null && (best===null||pt>best)) best=pt; }); if(best!==null){bestSum+=best;anyB=true;} bestCells.push(best===null?"\u00b7":best); }
+                                        return (
+                                          <div key={nine} style={{marginBottom:4, overflowX:"auto"}}>
+                                            <div style={{minWidth:320}}>
+                                              <div style={col}>
+                                                <div style={{fontSize:8,color:CL.muted,fontFamily:"system-ui",fontWeight:700}}>HOLE</div>
+                                                {Array.from({length:9},function(_,k){return <div key={k} style={{textAlign:"center",fontSize:9,color:CL.muted,fontFamily:"system-ui",fontWeight:700}}>{s+k+1}</div>;})}
+                                                <div style={{textAlign:"center",fontSize:8,color:CL.muted,fontFamily:"system-ui",fontWeight:700}}>{nine===0?"OUT":"IN"}</div>
+                                              </div>
+                                              {pairIds.map(function(pid){
+                                                var sum=0,any=false,cells=[];
+                                                for(var k=0;k<9;k++){var pt=pPts(pid,s+k); if(pt!==null){sum+=pt;any=true;} cells.push(pt===null?"\u00b7":pt);}
+                                                return <div key={pid} style={col}>
+                                                  <div style={{fontSize:9,color:CL.muted,fontFamily:"system-ui"}}>{fName(pid).split(" ")[0]}</div>
+                                                  {cells.map(function(v,i){return <div key={i} style={{textAlign:"center",fontSize:11,color:CL.muted,fontFamily:"system-ui"}}>{v}</div>;})}
+                                                  <div style={{textAlign:"center",fontSize:11,color:CL.muted,fontFamily:"system-ui",fontWeight:700}}>{any?sum:"\u2014"}</div>
+                                                </div>;
+                                              })}
+                                              <div style={col}>
+                                                <div style={{fontSize:9,color:"#22c55e",fontFamily:"system-ui",fontWeight:700}}>BEST</div>
+                                                {bestCells.map(function(v,i){return <div key={i} style={{textAlign:"center",fontSize:12,color:"#22c55e",fontFamily:"system-ui",fontWeight:700}}>{v}</div>;})}
+                                                <div style={{textAlign:"center",fontSize:12,color:"#22c55e",fontFamily:"system-ui",fontWeight:800}}>{anyB?bestSum:"\u2014"}</div>
+                                              </div>
+                                            </div>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  );
+                                }
+                                return (
+                                  <div style={{marginTop:8, padding:"8px 10px", background:"rgba(30,58,95,0.18)", borderRadius:8}}>
+                                    <div style={{fontSize:9, color:CL.muted, fontFamily:"system-ui", fontWeight:700, marginBottom:6, letterSpacing:0.5}}>{"HOLE-BY-HOLE BEST BALL \u00b7 "+COURSE_LABELS[ri]}</div>
+                                    {PairTable(m.pairA, "Side A \u2014 "+fName(m.pairA[0]).split(" ")[0]+" & "+fName(m.pairA[1]).split(" ")[0])}
+                                    {PairTable(m.pairB, "Side B \u2014 "+fName(m.pairB[0]).split(" ")[0]+" & "+fName(m.pairB[1]).split(" ")[0])}
+                                    <div style={{fontSize:13, fontFamily:"system-ui", color:"#fff", fontWeight:700, marginTop:4, textAlign:"center"}}>{"Best-ball total \u2014 A "+(pairLive(m.pairA,ri)===null?"\u2013":pairLive(m.pairA,ri))+"  \u00b7  B "+(pairLive(m.pairB,ri)===null?"\u2013":pairLive(m.pairB,ri))}</div>
+                                    <div style={{fontSize:9, color:CL.muted, fontFamily:"system-ui", marginTop:3, textAlign:"center", lineHeight:1.4}}>{"BEST = the pair's best ball on that hole (higher of the two players' net Stableford points). The sum of the BEST row is the pair's match score."}</div>
+                                  </div>
+                                );
+                              })()}
 
                               {/* Backer action is its OWN $stake pool, settled among the backers only —
                                   completely separate from the four-man match above. */}
