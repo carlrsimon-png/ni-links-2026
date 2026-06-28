@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, savePropUnits, saveOuUnits, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "4.5";
+const APP_VERSION = "4.6";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 // Skins and Individual Gross Stableford were removed to simplify the bet menu.
@@ -652,6 +652,43 @@ function getTeamTotalBestBall(scores, players, teamIds) {
   return any ? t : 0;
 }
 
+// Foursome match format by course. Ardglass (index 0) stays best-ball net Stableford
+// AGGREGATE (sum of best balls; higher total wins). RCD onward (index >= 1) are best-ball
+// MATCH PLAY (each hole won/lost/halved; most holes won wins; all square pushes).
+var FOURSOME_MATCHPLAY_FROM = 1;
+function foursomeIsMatchPlay(ri) { return ri >= FOURSOME_MATCHPLAY_FROM; }
+
+// Best-ball MATCH PLAY for a 2-v-2 match on one course. Each hole: a side's ball is the
+// lower (better) NET score of its two players; the side with the lower net wins the hole,
+// equal halves. Returns { aHoles, bHoles, halved, perHole:[{aNet,bNet,w}] } or null.
+function foursomeMatchPlay(scores, players, pairA, pairB, ri) {
+  var course = COURSES[ri];
+  if (!course || !course.pars || !course.si) return null;
+  function bestNet(ids, h) {
+    var best = null;
+    for (var i = 0; i < ids.length; i++) {
+      var p = players.find(function(x) { return x.id === ids[i]; });
+      if (!p) continue;
+      var g = scores[ids[i]] && scores[ids[i]][ri] && scores[ids[i]][ri][h];
+      if (g == null) continue;
+      var net = g - strokesOnHole(getCourseHandicap(p.handicap, ri), course.si[h]);
+      if (best === null || net < best) best = net;
+    }
+    return best; // null = no ball posted on this hole
+  }
+  var aHoles = 0, bHoles = 0, halved = 0, perHole = [];
+  for (var h = 0; h < 18; h++) {
+    var aNet = bestNet(pairA, h), bNet = bestNet(pairB, h), w = null;
+    if (aNet !== null && bNet !== null) {
+      if (aNet < bNet) { aHoles++; w = "A"; }
+      else if (bNet < aNet) { bHoles++; w = "B"; }
+      else { halved++; w = "H"; }
+    }
+    perHole.push({ aNet: aNet, bNet: bNet, w: w });
+  }
+  return { aHoles: aHoles, bHoles: bHoles, halved: halved, perHole: perHole };
+}
+
 function getCountdown() {
   var now = new Date();
   var trip = new Date(TRIP_DATE);
@@ -806,15 +843,20 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
       if (core.length === 0) return;
       // Only final & countable once every core player has all 18 holes in.
       if (!roundComplete(scores, ri, core)) return;
-      function pairPts(ids) {
-        // Best-ball net Stableford: on each hole only the pair's single best ball counts —
-        // the low NET score (the player's handicap stroke applied on that hole), scored
-        // Stableford. The lowest net ball is exactly the ball worth the most Stableford
-        // points, so this equals taking the pair's best points each hole.
-        return getTeamRoundBestBall(scores, players, ids, ri);
+      // Decide the winning side by this course's format. Ardglass = best-ball net Stableford
+      // AGGREGATE (higher total wins). RCD onward = best-ball MATCH PLAY (more holes won wins;
+      // all square pushes — no money). aWins=true => pairA took it, false => pairB.
+      var aWins;
+      if (foursomeIsMatchPlay(ri)) {
+        var mp = foursomeMatchPlay(scores, players, pairA, pairB, ri);
+        if (!mp || mp.aHoles === mp.bHoles) return; // all square / no result → push, no money
+        aWins = mp.aHoles > mp.bHoles;
+      } else {
+        var aPts = getTeamRoundBestBall(scores, players, pairA, ri);
+        var bPts = getTeamRoundBestBall(scores, players, pairB, ri);
+        if (aPts === null || bPts === null || aPts === bPts) return; // tie/incomplete → no money
+        aWins = aPts > bPts;
       }
-      var aPts = pairPts(pairA), bPts = pairPts(pairB);
-      if (aPts === null || bPts === null || aPts === bPts) return; // tie/incomplete → no money
       // Defensive: a backer must be an outsider and on only one side.
       function cleanBackers(list, otherList) {
         return (list || []).filter(function(id) {
@@ -824,8 +866,8 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
       var bckA = cleanBackers(m.backersA, m.backersB);
       var bckB = cleanBackers(m.backersB, m.backersA);
       var stake = m.stake || STAKE_FOURSOME;
-      var winCore = aPts > bPts ? pairA : pairB;
-      var loseCore = aPts > bPts ? pairB : pairA;
+      var winCore = aWins ? pairA : pairB;
+      var loseCore = aWins ? pairB : pairA;
       // 1) The foursome match itself — the four core players only. Losers each pay
       //    `stake`, split evenly among the winners (2-v-2 → ±$stake each).
       if (winCore.length > 0 && loseCore.length > 0) {
@@ -837,8 +879,8 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
       // 2) Backer side bet — a SEPARATE $stake pool among the outside backers only.
       //    The match result decides the side; losing-side backers pay, winning-side
       //    backers split. One-sided (no backers opposing) = void, no money moves.
-      var winBck = aPts > bPts ? bckA : bckB;
-      var loseBck = aPts > bPts ? bckB : bckA;
+      var winBck = aWins ? bckA : bckB;
+      var loseBck = aWins ? bckB : bckA;
       if (winBck.length > 0 && loseBck.length > 0) {
         var bckLoseTotal = loseBck.length * stake;
         var bckWinEach = bckLoseTotal / winBck.length;
@@ -3641,7 +3683,7 @@ function BetsTab(props) {
                 {H("🤖 AUTOMATIC — YOU'RE ALREADY IN, SCORED BY THE APP")}
                 {Row("Team Stableford", "$100/man", "Public ("+pub+") vs Private ("+priv+"). Best-ball net Stableford over all 5 rounds (best ball each hole) — the winning four each collect $100.")}
                 {SHOW_GROSS && Row("Gross Brackets", "$50/man, winner-take-all", "Gross Stableford for the whole trip, split by handicap.  ⛰️ The Mournes: "+mournes+".  🌊 The Causeway: "+causeway+".")}
-                {Row("Foursome Matches", "$"+STAKE_FOURSOME+"/man", "Two 2-v-2 matches each course — your pair's best-ball net Stableford (only the best ball on each hole counts) vs the other pair. You're auto-entered in your own match every round.")}
+                {Row("Foursome Matches", "$"+STAKE_FOURSOME+"/man", "Two 2-v-2 matches each course, best ball (only the best ball on each hole counts). Ardglass is total net Stableford; RCD onward is match play (win the most holes). You're auto-entered in your own match every round.")}
                 {H("✋ OPT IN — TAP TO JOIN (in the tabs above)")}
                 {SHOW_SKINS && Row("Skins", "$"+STAKE_SKIN+"/skin, net", "Five per-course games plus trip-long gross & net pots. Join whichever you want on the 🔪 Skins tab.")}
                 {Row("Individual Props", "$"+DEFAULT_BUYIN+" each, winner-take-all", "Most Net Stableford (whole trip + each of the 5 courses) and Lowest Net Score (trip). Pick your spots on the 🎯 Props tab.")}
@@ -3787,7 +3829,7 @@ function BetsTab(props) {
               return (
                 <div style={S.card}>
                   <div style={S.cardTitle}>👥 Foursome Matches</div>
-                  <div style={Object.assign({}, S.label, {marginBottom:4})}>Two 2-v-2 Stableford matches per course. Each pair's score is best-ball net Stableford — on each hole only the pair's single best ball counts — higher total wins. Resolves automatically from scores.</div>
+                  <div style={Object.assign({}, S.label, {marginBottom:4})}>Two 2-v-2 best-ball matches per course (only the best ball on each hole counts). Ardglass is total net Stableford — higher total wins. RCD onward is match play — each hole won/lost/halved, most holes won wins (all square pushes). Resolves automatically from scores.</div>
                   <div style={{fontSize:12, color:CL.red, fontFamily:"system-ui", marginBottom:10, fontWeight:600}}>{"$"+STAKE_FOURSOME+"/man · open pool — anyone can back a side; the losing side pays the winners, split evenly"}</div>
                   {COURSES.map(function(c, ri) {
                     var ms = foursomeMatches.filter(function(m){return m.courseIdx===ri;});
@@ -3798,9 +3840,15 @@ function BetsTab(props) {
                         {ms.map(function(m, mi) {
                           var core = m.pairA.concat(m.pairB);
                           var roundFinal = roundComplete(scores, ri, core);
-                          var aPts = pairLive(m.pairA, ri), bPts = pairLive(m.pairB, ri);
-                          var decided = roundFinal && aPts !== null && bPts !== null && aPts !== bPts;
-                          var aWin = decided && aPts > bPts, bWin = decided && bPts > aPts;
+                          var isMP = foursomeIsMatchPlay(ri);
+                          var mpRes = isMP ? foursomeMatchPlay(scores, players, m.pairA, m.pairB, ri) : null;
+                          var aPts = pairLive(m.pairA, ri), bPts = pairLive(m.pairB, ri); // Stableford points (Ardglass)
+                          var aHoles = mpRes ? mpRes.aHoles : 0, bHoles = mpRes ? mpRes.bHoles : 0;
+                          var started = isMP ? !!(mpRes && (aHoles + bHoles + mpRes.halved) > 0) : (aPts !== null || bPts !== null);
+                          var decided = isMP ? (roundFinal && mpRes && aHoles !== bHoles)
+                                             : (roundFinal && aPts !== null && bPts !== null && aPts !== bPts);
+                          var aWin = decided && (isMP ? aHoles > bHoles : aPts > bPts);
+                          var bWin = decided && (isMP ? bHoles > aHoles : bPts > aPts);
                           var bckA = (m.backersA||[]).filter(function(id){ return core.indexOf(id)<0 && (m.backersB||[]).indexOf(id)<0; });
                           var bckB = (m.backersB||[]).filter(function(id){ return core.indexOf(id)<0 && (m.backersA||[]).indexOf(id)<0; });
                           var winCore = aWin ? m.pairA : m.pairB, loseCore = aWin ? m.pairB : m.pairA;
@@ -3811,10 +3859,13 @@ function BetsTab(props) {
                           var backed = bckA.concat(bckB);
                           var canBack = players.filter(function(p){ return core.indexOf(p.id)<0 && backed.indexOf(p.id)<0; });
                           function sideBox(pairIds, isWin) {
+                            var isA = pairIds === m.pairA;
+                            var hw = isA ? aHoles : bHoles;
+                            var sub = isMP ? (hw + " hole" + (hw===1?"":"s") + " won") : ((pairLive(pairIds, ri)===null?"–":pairLive(pairIds, ri)) + " pts");
                             return (
                               <div style={Object.assign({}, S.teamBox, isWin ? S.teamBoxWin : {}, {flex:1})}>
                                 {pairIds.map(function(pid){ return <div key={pid} style={{fontSize:13, color:"#fff", fontFamily:"system-ui"}}>{fName(pid)}</div>; })}
-                                <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginTop:6}}>{pairIds.length+" in · "+(pairLive(pairIds, ri)===null?"–":pairLive(pairIds, ri))+" pts"}</div>
+                                <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginTop:6}}>{pairIds.length+" in · "+sub}</div>
                               </div>
                             );
                           }
@@ -3835,20 +3886,59 @@ function BetsTab(props) {
                                 {sideBox(m.pairB, bWin)}
                               </div>
                               {decided ? (
-                                <div style={{textAlign:"center", marginTop:8, fontSize:13, fontWeight:700, color:"#22c55e", fontFamily:"system-ui"}}>{"🏆 "+fName(aWin?m.pairA[0]:m.pairB[0]).split(" ")[1]+" & "+fName(aWin?m.pairA[1]:m.pairB[1]).split(" ")[1]+" win · each winner +$"+(Math.round(coreWinEach*100)/100)}</div>
+                                <div style={{textAlign:"center", marginTop:8, fontSize:13, fontWeight:700, color:"#22c55e", fontFamily:"system-ui"}}>{"🏆 "+fName(aWin?m.pairA[0]:m.pairB[0]).split(" ")[1]+" & "+fName(aWin?m.pairA[1]:m.pairB[1]).split(" ")[1]+" win"+(isMP ? " · "+Math.max(aHoles,bHoles)+"–"+Math.min(aHoles,bHoles)+" holes" : "")+" · each winner +$"+(Math.round(coreWinEach*100)/100)}</div>
                               ) : roundFinal ? (
                                 <div style={{textAlign:"center", marginTop:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>All square — no money moves</div>
-                              ) : (aPts!==null||bPts!==null) ? (
-                                <div style={{textAlign:"center", marginTop:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>{"Live — "+((aPts||0)===(bPts||0)?"all square":((aPts||0)>(bPts||0)?"Side A":"Side B")+" up "+Math.abs((aPts||0)-(bPts||0)))}</div>
+                              ) : started ? (
+                                <div style={{textAlign:"center", marginTop:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>{"Live — "+(isMP
+                                  ? (aHoles===bHoles ? "all square" : (aHoles>bHoles?"Side A":"Side B")+" "+Math.abs(aHoles-bHoles)+" up")
+                                  : ((aPts||0)===(bPts||0)?"all square":((aPts||0)>(bPts||0)?"Side A":"Side B")+" up "+Math.abs((aPts||0)-(bPts||0))))}</div>
                               ) : (
                                 <div style={{textAlign:"center", marginTop:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>Not started</div>
                               )}
 
-                              {(aPts!==null||bPts!==null) && (
+                              {started && (
                                 <button onClick={function(){ setMatchDetail(function(prev){ var n=Object.assign({},prev); if(n[m.id]) delete n[m.id]; else n[m.id]=true; return n; }); }} style={{marginTop:8, fontSize:11, color:CL.blue, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:6, padding:"5px 10px", cursor:"pointer"}}>{matchDetail[m.id] ? "\u25be Hide hole-by-hole" : "\u25b8 Hole-by-hole best ball"}</button>
                               )}
                               {matchDetail[m.id] && (function() {
                                 var course = COURSES[ri];
+                                if (foursomeIsMatchPlay(ri)) {
+                                  var mp2 = foursomeMatchPlay(scores, players, m.pairA, m.pairB, ri);
+                                  var pNet = function(pid, h) { var pl=players.find(function(x){return x.id===pid;}); if(!pl) return null; var g=scores[pid]&&scores[pid][ri]&&scores[pid][ri][h]; if(g==null) return null; return g - strokesOnHole(getCourseHandicap(pl.handicap, ri), course.si[h]); };
+                                  var bestNetH = function(ids, h) { var b=null; ids.forEach(function(pid){ var n=pNet(pid,h); if(n!==null&&(b===null||n<b))b=n; }); return b; };
+                                  var MPNine = function(nine) {
+                                    var s=nine*9;
+                                    var col={display:"grid", gridTemplateColumns:"40px repeat(9,1fr)", gap:2, marginBottom:2, alignItems:"center"};
+                                    var row = function(label, color, fn, bold) {
+                                      return <div style={col}>
+                                        <div style={{fontSize:8,color:color||CL.muted,fontFamily:"system-ui",fontWeight:700}}>{label}</div>
+                                        {Array.from({length:9},function(_,k){var v=fn(s+k); return <div key={k} style={{textAlign:"center",fontSize:bold?12:11,color:color||CL.muted,fontFamily:"system-ui",fontWeight:bold?800:400}}>{v}</div>;})}
+                                      </div>;
+                                    };
+                                    return (
+                                      <div key={nine} style={{marginBottom:6, overflowX:"auto"}}>
+                                        <div style={{minWidth:330}}>
+                                          {row("HOLE", CL.muted, function(h){return h+1;}, false)}
+                                          {m.pairA.map(function(pid){ return <div key={pid}>{row(fName(pid).split(" ")[0], CL.muted, function(h){var n=pNet(pid,h);return n===null?"\u00b7":n;}, false)}</div>; })}
+                                          {row("A best", CL.red, function(h){var n=bestNetH(m.pairA,h);return n===null?"\u00b7":n;}, true)}
+                                          {m.pairB.map(function(pid){ return <div key={pid}>{row(fName(pid).split(" ")[0], CL.muted, function(h){var n=pNet(pid,h);return n===null?"\u00b7":n;}, false)}</div>; })}
+                                          {row("B best", CL.blue, function(h){var n=bestNetH(m.pairB,h);return n===null?"\u00b7":n;}, true)}
+                                          {row("WON", "#22c55e", function(h){var w=mp2.perHole[h].w;return w==="A"?"A":w==="B"?"B":w==="H"?"\u00bd":"\u00b7";}, true)}
+                                        </div>
+                                      </div>
+                                    );
+                                  };
+                                  return (
+                                    <div style={{marginTop:8, padding:"8px 10px", background:"rgba(30,58,95,0.18)", borderRadius:8}}>
+                                      <div style={{fontSize:9, color:CL.muted, fontFamily:"system-ui", fontWeight:700, marginBottom:6, letterSpacing:0.5}}>{"HOLE-BY-HOLE MATCH PLAY \u00b7 "+COURSE_LABELS[ri]}</div>
+                                      <div style={{fontSize:9, color:CL.muted, fontFamily:"system-ui", marginBottom:4, lineHeight:1.4}}>{"A = "+fName(m.pairA[0]).split(" ")[0]+" & "+fName(m.pairA[1]).split(" ")[0]+"   B = "+fName(m.pairB[0]).split(" ")[0]+" & "+fName(m.pairB[1]).split(" ")[0]+"   (numbers = net score)"}</div>
+                                      {MPNine(0)}
+                                      {MPNine(1)}
+                                      <div style={{fontSize:13, fontFamily:"system-ui", color:"#fff", fontWeight:700, marginTop:4, textAlign:"center"}}>{"Holes won \u2014 A "+mp2.aHoles+" \u00b7 B "+mp2.bHoles+(mp2.halved?" \u00b7 halved "+mp2.halved:"")}</div>
+                                      <div style={{fontSize:9, color:CL.muted, fontFamily:"system-ui", marginTop:3, textAlign:"center", lineHeight:1.4}}>{"Each hole: the side with the lower best NET ball wins it (\u00bd = halved). Most holes won wins; all square pushes."}</div>
+                                    </div>
+                                  );
+                                }
                                 function pPts(pid, h) { var pl = players.find(function(x){return x.id===pid;}); if (!pl) return null; var g = scores[pid] && scores[pid][ri] && scores[pid][ri][h]; if (g == null) return null; return stablefordPointsForHole(g, course.pars[h], getCourseHandicap(pl.handicap, ri), course.si[h]); }
                                 function PairTable(pairIds, label) {
                                   return (
