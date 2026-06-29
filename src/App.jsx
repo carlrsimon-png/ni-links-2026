@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, savePropUnits, saveOuUnits, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "4.8";
+const APP_VERSION = "4.9";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 // Skins and Individual Gross Stableford were removed to simplify the bet menu.
@@ -766,6 +766,19 @@ function matchOu(overUnits, underUnits, overTimes, underTimes) {
   return { overMatched: alloc(overUnits, overTimes), underMatched: alloc(underUnits, underTimes), matched: M, overTotal: overTot, underTotal: underTot };
 }
 
+// Resolve a head-to-head bet's units. New bets carry aUnits/bUnits (+ timestamps). Any
+// legacy pool-style bet (sideA/sideB lists, or bettor/opponent) is read as 1 unit each so
+// the same matching engine drives both the settlement and the on-screen card.
+function h2hUnits(b) {
+  if (b.aUnits || b.bUnits) {
+    return { aU: b.aUnits || {}, bU: b.bUnits || {}, aT: b.aTimes || {}, bT: b.bTimes || {} };
+  }
+  var aU = {}, bU = {};
+  (b.sideA || (b.bettor ? [b.bettor] : [])).forEach(function(id) { if (id) aU[id] = 1; });
+  (b.sideB || (b.opponent ? [b.opponent] : [])).forEach(function(id) { if (id) bU[id] = 1; });
+  return { aU: aU, bU: bU, aT: {}, bT: {} };
+}
+
 function computeBalances(players, games, bets, h2hBets, teamMatches, individualProps, expenses, scores, skinsEligible, foursomeMatches, overUnderProps, manualWinners) {
   var mWins = manualWinners || {};
   var mwTeam = mWins.team || null;            // "a" | "b" | null
@@ -807,19 +820,22 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
     });
   }
 
-  // Head-to-head bets (with sides)
+  // Head-to-head bets — matched book (same engine as Over/Unders). Side A units pair
+  // 1-for-1 against Side B units, even money at the stake; first in line matches first;
+  // unmatched excess is void. h2hUnits() reads new aUnits/bUnits and legacy 1-v-1 sides
+  // so one engine drives both the on-screen card and settlement.
   if (h2hBets) {
     h2hBets.forEach(function(b) {
       if (!b.settled) return;
-      var sA = b.sideA || [b.bettor];
-      var sB = b.sideB || [b.opponent];
-      var winSide = b.winningSide === "a" ? sA : sB;
-      var loseSide = b.winningSide === "a" ? sB : sA;
-      if (winSide.length === 0) return; // no valid winning side
-      var loseTotal = loseSide.length * b.stake;
-      var winEach = loseTotal / winSide.length;
-      loseSide.forEach(function(pid) { balances[pid] = (balances[pid] || 0) - b.stake; });
-      winSide.forEach(function(pid) { balances[pid] = (balances[pid] || 0) + winEach; });
+      var u = h2hUnits(b);
+      var mm = matchOu(u.aU, u.bU, u.aT, u.bT); // aU -> "over", bU -> "under"
+      if (mm.matched === 0) return; // nothing paired off — whole bet voids
+      var stake = b.stake || DEFAULT_BUYIN;
+      var winMatched = b.winningSide === "a" ? mm.overMatched : mm.underMatched;
+      var loseMatched = b.winningSide === "a" ? mm.underMatched : mm.overMatched;
+      // Matched A total === matched B total by construction, so this sums to $0.
+      Object.keys(winMatched).forEach(function(id) { balances[id] = (balances[id] || 0) + winMatched[id] * stake; });
+      Object.keys(loseMatched).forEach(function(id) { balances[id] = (balances[id] || 0) - loseMatched[id] * stake; });
     });
   }
 
@@ -4620,64 +4636,71 @@ function BetsTab(props) {
         <div>
           <div style={S.card}>
             <div style={S.cardTitle}>⚔️ Head-to-Head Bets</div>
-            <div style={Object.assign({}, S.label, {marginBottom:12})}>Anyone signed in can create a bet, Jump In on either side, and settle the result. Losers pay winners, split evenly.</div>
+            <div style={Object.assign({}, S.label, {marginBottom:12})}>Matched book — like a betting exchange. Side A units pair 1-for-1 against Side B at even money; whatever doesn't match is void. Only Carl can create, size (− / +), and settle.</div>
+
+            <div style={Object.assign({}, S.label, {marginBottom:12})}>Matched book: Side A units pair 1-for-1 against Side B (even money at the stake). First in line matches first; unmatched units are void. Use − / + to size a bet; matched units 🔒 lock.</div>
 
             {h2hBets.map(function(bet) {
-              var sideA = bet.sideA || [bet.bettor];
-              var sideB = bet.sideB || [bet.opponent];
-              var allIn = sideA.concat(sideB);
-              var canJoin = players.filter(function(p) { return allIn.indexOf(p.id) === -1; });
-              var totalPot = bet.stake * allIn.length;
+              var u = h2hUnits(bet);
+              var aU = u.aU, bU = u.bU, aT = u.aT, bT = u.bT;
+              var mm = matchOu(aU, bU, aT, bT); // aU -> over, bU -> under
+              var aIds = Object.keys(aU).filter(function(id){ return (aU[id]||0)>=1; }).sort(function(x,y){ return (aT[x]||0)-(aT[y]||0); });
+              var bIds = Object.keys(bU).filter(function(id){ return (bU[id]||0)>=1 && aIds.indexOf(id)<0; }).sort(function(x,y){ return (bT[x]||0)-(bT[y]||0); });
+              var inAny = aIds.concat(bIds);
+              var undecided = players.filter(function(pl){ return inAny.indexOf(pl.id)<0; });
+              var stake = bet.stake || DEFAULT_BUYIN;
+              var aUnmatched = mm.overTotal - mm.matched, bUnmatched = mm.underTotal - mm.matched;
               var winSide = bet.winningSide;
+              function fn(id){ var pl=players.find(function(x){return x.id===id;}); return pl?pl.emoji+" "+pl.name.split(" ")[0]:id; }
+              function matchedFor(id, side){ return ((side==="a"?mm.overMatched:mm.underMatched)[id])||0; }
 
-              function joinSide(pid, side) {
-                var updated = h2hBets.map(function(b) {
+              // Single writer (Carl), so units live on the bet object and write via update().
+              // Setting a side clears the player from the other side. 0 units = removed.
+              function setH2h(pid, side, n, curTs) {
+                if (!props.canEdit) return;
+                var nv = Math.max(0, n);
+                var ts = curTs || Date.now(); // keep place in line on +/-; brand-new = now
+                update({h2hBets: h2hBets.map(function(b) {
                   if (b.id !== bet.id) return b;
-                  var nb = Object.assign({}, b);
-                  nb.sideA = (nb.sideA || [nb.bettor]).slice();
-                  nb.sideB = (nb.sideB || [nb.opponent]).slice();
-                  // Guard: never add a player who's already on either side
-                  if (nb.sideA.indexOf(pid) >= 0 || nb.sideB.indexOf(pid) >= 0) return nb;
-                  if (side === "a") nb.sideA.push(pid);
-                  else nb.sideB.push(pid);
-                  return nb;
-                });
-                update({h2hBets:updated});
-              }
-
-              function removeSide(pid, side) {
-                var updated = h2hBets.map(function(b) {
-                  if (b.id !== bet.id) return b;
-                  var nb = Object.assign({}, b);
-                  nb.sideA = (nb.sideA || [nb.bettor]).slice();
-                  nb.sideB = (nb.sideB || [nb.opponent]).slice();
-                  if (side === "a") nb.sideA = nb.sideA.filter(function(id) { return id !== pid; });
-                  else nb.sideB = nb.sideB.filter(function(id) { return id !== pid; });
-                  return nb;
-                });
-                update({h2hBets:updated});
-              }
-
-              function settleBet(winningSide) {
-                update({h2hBets:h2hBets.map(function(b) {
-                  return b.id === bet.id ? Object.assign({}, b, {settled:true, winningSide:winningSide, winner:winningSide === "a" ? bet.bettor : bet.opponent}) : b;
+                  var uu = h2hUnits(b); // migrate legacy sides -> units on first edit
+                  var na = Object.assign({}, uu.aU), nb2 = Object.assign({}, uu.bU);
+                  var nat = Object.assign({}, uu.aT), nbt = Object.assign({}, uu.bT);
+                  if (side === "a") {
+                    delete nb2[pid]; delete nbt[pid];
+                    if (nv <= 0) { delete na[pid]; delete nat[pid]; } else { na[pid] = nv; nat[pid] = ts; }
+                  } else {
+                    delete na[pid]; delete nat[pid];
+                    if (nv <= 0) { delete nb2[pid]; delete nbt[pid]; } else { nb2[pid] = nv; nbt[pid] = ts; }
+                  }
+                  return Object.assign({}, b, {aUnits:na, bUnits:nb2, aTimes:nat, bTimes:nbt});
                 })});
               }
+              function settleBet(side) {
+                update({h2hBets: h2hBets.map(function(b) { return b.id===bet.id ? Object.assign({}, b, {settled:true, winningSide:side, winner:side==="a"?bet.bettor:bet.opponent}) : b; })});
+              }
+              function unsettleBet() {
+                update({h2hBets: h2hBets.map(function(b) { return b.id===bet.id ? Object.assign({}, b, {settled:false, winningSide:null, winner:null}) : b; })});
+              }
 
-              // Render a player row with label and optional remove button
-              function playerRow(pid, isCreator, side, sideColor) {
-                var p = players.find(function(x) { return x.id===pid; });
-                if (!p) return null;
+              function chip(id, side, umap, tmap) {
+                var cnt = umap[id]||0, mcnt = matchedFor(id, side); var c = side==="a"?CL.red:CL.blue;
+                var canDec = !bet.settled && props.canEdit && cnt>mcnt; // hard-lock matched units
+                return <span key={id+side} style={Object.assign({},S.pillBtn,{background:side==="a"?"rgba(240,69,74,0.18)":"rgba(111,172,255,0.18)",borderColor:c,color:c,display:"inline-flex",alignItems:"center",gap:4,padding:"4px 7px",marginRight:4,marginBottom:4})}>
+                  {!bet.settled && <span onClick={function(){ if(canDec) setH2h(id,side,cnt-1,tmap[id]); }} style={{cursor:canDec?"pointer":"not-allowed",fontWeight:700,fontSize:16,lineHeight:1,padding:"0 3px",opacity:canDec?1:0.25}}>−</span>}
+                  <span style={{fontSize:12}}>{fn(id)}{id===bet.bettor||id===bet.opponent?" ★":""}</span>
+                  <span style={{fontSize:12,fontWeight:800}}>{"×"+cnt}</span>
+                  {mcnt>0 && <span style={{fontSize:10,opacity:0.85}} title="matched / locked">{"🔒"+mcnt}</span>}
+                  {!bet.settled && <span onClick={function(){ if(props.canEdit) setH2h(id,side,cnt+1,tmap[id]); }} style={{cursor:"pointer",fontWeight:700,fontSize:16,lineHeight:1,padding:"0 3px",opacity:props.canEdit?1:0.4}}>+</span>}
+                </span>;
+              }
+              function sideBox(label, ids, side, umap, tmap, color, won) {
+                var tot = ids.reduce(function(s,id){ return s+(umap[id]||0); }, 0);
+                var mtot = ids.reduce(function(s,id){ return s+matchedFor(id,side); }, 0);
                 return (
-                  <div key={pid} style={{display:"flex", alignItems:"center", justifyContent:"space-between", padding:"3px 0"}}>
-                    <div style={{fontSize:14, color:"#fff", fontFamily:"system-ui"}}>
-                      {p.emoji+" "+p.name}
-                      {isCreator && <span style={{fontSize:10, color:sideColor, marginLeft:6}}>★</span>}
-                      {!isCreator && <span style={{fontSize:10, color:CL.muted, marginLeft:6}}>(joined)</span>}
-                    </div>
-                    {!isCreator && !bet.settled && (
-                      <button onClick={function(e) { e.stopPropagation(); removeSide(pid, side); }} style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:12, padding:"2px 6px"}}>✕</button>
-                    )}
+                  <div style={Object.assign({}, S.teamBox, bet.settled && won ? S.teamBoxWin : {}, {flex:1})}>
+                    <div style={{fontSize:12,fontWeight:700,color:color,fontFamily:"system-ui",marginBottom:6}}>{label+" · "+tot+"u · "+mtot+" matched"}</div>
+                    {ids.length===0 && <div style={{fontSize:12,color:CL.muted,fontFamily:"system-ui"}}>—</div>}
+                    <div style={{display:"flex",flexWrap:"wrap"}}>{ids.map(function(id){ return chip(id,side,umap,tmap); })}</div>
                   </div>
                 );
               }
@@ -4688,59 +4711,52 @@ function BetsTab(props) {
                     <div style={{flex:1}}>
                       {bet.course && <div style={{display:"inline-block", fontSize:11, fontWeight:700, color:"#22c55e", fontFamily:"system-ui", background:"rgba(34,197,94,0.12)", padding:"3px 10px", borderRadius:10, marginBottom:4}}>{bet.course}</div>}
                       <div style={{fontSize:15, fontWeight:600, color:bet.settled?CL.muted:"#fff", textDecoration:bet.settled?"line-through":"none"}}>{bet.description}</div>
-                      <div style={{fontSize:13, color:CL.red, fontFamily:"system-ui"}}>{"$"+bet.stake+"/person · $"+totalPot+" pot"}</div>
+                      <div style={{fontSize:13, color:CL.red, fontFamily:"system-ui"}}>{"$"+stake+"/unit · "+mm.matched+" matched ($"+(mm.matched*stake)+" at stake each side)"}</div>
                     </div>
                     {!bet.settled && props.canEdit && <button style={{background:"none", border:"none", color:CL.muted, cursor:"pointer", fontSize:14, flexShrink:0}} onClick={function() { if (confirm("Delete this bet?")) update({h2hBets:h2hBets.filter(function(b) { return b.id!==bet.id; })}); }}>🗑</button>}
                   </div>
 
-                  {/* Sides display with named players */}
                   <div style={{display:"flex", gap:8, marginTop:10}}>
-                    <div style={Object.assign({}, S.teamBox, bet.settled && winSide==="a" ? S.teamBoxWin : {})}>
-                      <div style={{fontSize:11, color:CL.red, fontFamily:"system-ui", fontWeight:700, marginBottom:6}}>SIDE A</div>
-                      {sideA.map(function(pid) { return playerRow(pid, pid === bet.bettor, "a", CL.red); })}
-                      <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginTop:4}}>{sideA.length + " player" + (sideA.length!==1?"s":"") + " · $" + (sideA.length * bet.stake)}</div>
-                    </div>
+                    {sideBox("SIDE A", aIds, "a", aU, aT, CL.red, winSide==="a")}
                     <div style={{display:"flex", alignItems:"center", color:CL.muted, fontWeight:700, fontFamily:"system-ui", fontSize:13}}>vs</div>
-                    <div style={Object.assign({}, S.teamBox, bet.settled && winSide==="b" ? S.teamBoxWin : {})}>
-                      <div style={{fontSize:11, color:CL.blue, fontFamily:"system-ui", fontWeight:700, marginBottom:6}}>SIDE B</div>
-                      {sideB.map(function(pid) { return playerRow(pid, pid === bet.opponent, "b", CL.blue); })}
-                      <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui", marginTop:4}}>{sideB.length + " player" + (sideB.length!==1?"s":"") + " · $" + (sideB.length * bet.stake)}</div>
-                    </div>
+                    {sideBox("SIDE B", bIds, "b", bU, bT, CL.blue, winSide==="b")}
                   </div>
 
-                  {/* Jump In — clear per-player buttons */}
-                  {!bet.settled && canJoin.length > 0 && (
-                    <div style={{marginTop:10, padding:10, background:"rgba(40,69,112,0.15)", borderRadius:8}}>
-                      <div style={{fontSize:12, color:CL.muted, fontFamily:"system-ui", fontWeight:600, marginBottom:8}}>{"ADD PLAYER — $"+bet.stake+" to join"}</div>
-                      {canJoin.map(function(p) {
-                        return (
-                          <div key={p.id} style={{display:"flex", alignItems:"center", gap:6, marginBottom:6}}>
-                            <div style={{flex:1, fontSize:14, color:"#fff", fontFamily:"system-ui"}}>{p.emoji+" "+p.name}</div>
-                            <button onClick={function() { joinSide(p.id, "a"); }} style={Object.assign({}, S.pillBtn, {fontSize:12, padding:"5px 12px", borderColor:"rgba(240,69,74,0.5)", color:CL.red})}>→ Side A</button>
-                            <button onClick={function() { joinSide(p.id, "b"); }} style={Object.assign({}, S.pillBtn, {fontSize:12, padding:"5px 12px", borderColor:"rgba(111,172,255,0.5)", color:CL.blue})}>→ Side B</button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
+                  <div style={{fontSize:11,color:(aUnmatched>0||bUnmatched>0)?CL.red:CL.muted,fontFamily:"system-ui",marginTop:6}}>{"⚖️ "+mm.matched+" unit"+(mm.matched!==1?"s":"")+" matched"+(aUnmatched>0?" · "+aUnmatched+" Side A unmatched (void unless B catches up)":bUnmatched>0?" · "+bUnmatched+" Side B unmatched (void unless A catches up)":"")}</div>
 
-                  {/* Settle buttons */}
                   {bet.settled ? (
-                    <div style={{marginTop:6}}>
-                      <div style={{fontSize:14, color:"#22c55e", fontFamily:"system-ui"}}>
-                        {"🏆 Side "+(winSide==="a"?"A":"B")+" wins! Each winner gets $"+Math.round(bet.stake * (winSide==="a"?sideB:sideA).length / (winSide==="a"?sideA:sideB).length)}
-                      </div>
-                      {props.canEdit && <button onClick={function() { update({h2hBets:h2hBets.map(function(b) { return b.id===bet.id ? Object.assign({}, b, {settled:false, winningSide:null, winner:null}) : b; })}); }} style={{marginTop:6, fontSize:11, color:CL.muted, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:6, padding:"5px 12px", cursor:"pointer"}}>↩ Undo — reopen bet</button>}
+                    <div style={{marginTop:8}}>
+                      <div style={{fontSize:14, color:mm.matched===0?CL.muted:"#22c55e", fontFamily:"system-ui"}}>{mm.matched===0 ? ("Settled Side "+(winSide==="a"?"A":"B")+" — no units matched, nothing moves") : ("🏆 Side "+(winSide==="a"?"A":"B")+" wins — "+mm.matched+" matched unit"+(mm.matched!==1?"s":"")+" settle even money at $"+stake+" each. Unmatched units void.")}</div>
+                      {props.canEdit && <button onClick={unsettleBet} style={{marginTop:6, fontSize:11, color:CL.muted, fontFamily:"system-ui", background:"none", border:"1px solid "+CL.border, borderRadius:6, padding:"5px 12px", cursor:"pointer"}}>↩ Undo — reopen bet</button>}
                     </div>
                   ) : (
-                    props.canEdit ? (
-                    <div style={{display:"flex", gap:6, marginTop:8}}>
-                      <button onClick={function() { settleBet("a"); }} style={Object.assign({}, S.pillBtn, {flex:1, textAlign:"center", padding:"8px 0", borderColor:"rgba(220,38,38,0.4)"})}>Side A wins</button>
-                      <button onClick={function() { settleBet("b"); }} style={Object.assign({}, S.pillBtn, {flex:1, textAlign:"center", padding:"8px 0", borderColor:"rgba(37,99,235,0.4)"})}>Side B wins</button>
+                    <div style={{marginTop:8}}>
+                      {props.canEdit && undecided.length>0 && (
+                        <div style={{marginBottom:8}}>
+                          <div style={{fontSize:11,color:CL.muted,fontFamily:"system-ui",marginBottom:4}}>Add to a side (then − / + for more units):</div>
+                          {undecided.map(function(pl){ return (
+                            <div key={pl.id} style={{display:"flex",alignItems:"center",gap:6,marginBottom:5}}>
+                              <div style={{flex:1,fontSize:13,color:"#fff",fontFamily:"system-ui"}}>{pl.emoji+" "+pl.name}</div>
+                              <button onClick={function(){ setH2h(pl.id,"a",1); }} style={Object.assign({}, S.pillBtn, {fontSize:11,padding:"4px 10px",borderColor:"rgba(240,69,74,0.5)",color:CL.red})}>→ Side A</button>
+                              <button onClick={function(){ setH2h(pl.id,"b",1); }} style={Object.assign({}, S.pillBtn, {fontSize:11,padding:"4px 10px",borderColor:"rgba(111,172,255,0.5)",color:CL.blue})}>→ Side B</button>
+                            </div>
+                          ); })}
+                        </div>
+                      )}
+                      {props.canEdit ? (
+                        (aIds.length>0||bIds.length>0) && (
+                        <div>
+                          <div style={{fontSize:11,color:CL.muted,fontFamily:"system-ui",marginBottom:4}}>Settle — which side won?</div>
+                          <div style={{display:"flex", gap:6}}>
+                            <button onClick={function() { settleBet("a"); }} style={Object.assign({}, S.pillBtn, {flex:1, textAlign:"center", padding:"8px 0", borderColor:"rgba(220,38,38,0.4)"})}>Side A wins</button>
+                            <button onClick={function() { settleBet("b"); }} style={Object.assign({}, S.pillBtn, {flex:1, textAlign:"center", padding:"8px 0", borderColor:"rgba(37,99,235,0.4)"})}>Side B wins</button>
+                          </div>
+                        </div>
+                        )
+                      ) : (
+                        <div style={{marginTop:8, fontSize:11, color:CL.muted, fontFamily:"system-ui", textAlign:"center"}}>Only Carl can settle the result</div>
+                      )}
                     </div>
-                    ) : (
-                    <div style={{marginTop:8, fontSize:11, color:CL.muted, fontFamily:"system-ui", textAlign:"center"}}>Sign in as a player to settle the result</div>
-                    )
                   )}
                 </div>
               );
@@ -4789,7 +4805,10 @@ function BetsTab(props) {
               var oP = players.find(function(p) { return p.id===opponent; });
               var courseLabel = h2hCourse || "Whole Trip";
               var autoDesc = (bP ? bP.name.split(" ")[0] : "P1") + " vs " + (oP ? oP.name.split(" ")[0] : "P2") + " · " + courseLabel + (h2hText.trim() ? " ("+h2hText.trim()+")" : "");
-              update({h2hBets:h2hBets.concat([{id:"h"+Date.now(), description:autoDesc, course:courseLabel, note:h2hText.trim(), stake:parseFloat(h2hAmt), bettor:bettor, opponent:opponent, sideA:[bettor], sideB:[opponent], settled:false, winner:null, winningSide:null}])});
+              var now = Date.now();
+              var aU0 = {}, bU0 = {}, aT0 = {}, bT0 = {};
+              aU0[bettor] = 1; bU0[opponent] = 1; aT0[bettor] = now; bT0[opponent] = now;
+              update({h2hBets:h2hBets.concat([{id:"h"+now, description:autoDesc, course:courseLabel, note:h2hText.trim(), stake:parseFloat(h2hAmt), bettor:bettor, opponent:opponent, aUnits:aU0, bUnits:bU0, aTimes:aT0, bTimes:bT0, settled:false, winner:null, winningSide:null}])});
               setH2hText(""); setH2hAmt(""); setBettor(null); setOpponent(null); setH2hCourse("");
             }}>Create Bet</button>
           </div>
