@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, savePropUnits, saveOuUnits, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "4.7";
+const APP_VERSION = "4.8";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 // Skins and Individual Gross Stableford were removed to simplify the bet menu.
@@ -854,6 +854,7 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
       // best-ball MATCH PLAY (more holes won wins; all square pushes). aWins true=>pairA.
       var aWins;
       var mw = mwFour[m.id];
+      if (mw === "push") return; // manual push — no money moves on this match
       if (mw === "A" || mw === "B") {
         aWins = mw === "A"; // manual override — wins regardless of scores/completion
       } else if (foursomeIsMatchPlay(ri)) {
@@ -955,7 +956,9 @@ function computeBalances(players, games, bets, h2hBets, teamMatches, individualP
     var tsTotA = getTeamTotalBestBall(scores, players, tsA);
     var tsTotB = getTeamTotalBestBall(scores, players, tsB);
     var TS_STAKE = STAKE_TEAM;
-    if (mwTeam === "a" || mwTeam === "b") {
+    if (mwTeam === "push") {
+      // Carl-set manual push — no money moves on the team bet.
+    } else if (mwTeam === "a" || mwTeam === "b") {
       // Carl-set manual winner overrides the auto best-ball result.
       var tsWinM = mwTeam === "a" ? tsA : tsB;
       var tsLoseM = mwTeam === "a" ? tsB : tsA;
@@ -3800,16 +3803,17 @@ function BetsTab(props) {
                   <div style={{fontSize:11, color:CL.muted, fontFamily:"system-ui"}}>points</div>
                 </div>
               </div>
-              {anyScores && <div style={{textAlign:"center", marginTop:12, fontSize:15, fontWeight:700, color:aLead||bLead?"#22c55e":CL.muted, fontFamily:"system-ui"}}>
-                {aTotal===bTotal ? "All square" : (aLead?matchup.teamA.name:matchup.teamB.name)+" lead by "+Math.abs(aTotal-bTotal)}
+              {anyScores && <div style={{textAlign:"center", marginTop:12, fontSize:15, fontWeight:700, color:(aLead||bLead)?"#22c55e":CL.muted, fontFamily:"system-ui"}}>
+                {tOv==="push" ? "Push — no money moves" : (aTotal===bTotal ? "All square" : (aLead?matchup.teamA.name:matchup.teamB.name)+" lead by "+Math.abs(aTotal-bTotal))}
               </div>}
               {!anyScores && <div style={{textAlign:"center", marginTop:12, fontSize:13, color:CL.muted, fontFamily:"system-ui"}}>Enter scores to start the competition.</div>}
-              {tOv && <div style={{textAlign:"center", marginTop:6, fontSize:10, color:"#e879c9", fontFamily:"system-ui"}}>Winner set manually — overrides points</div>}
+              {tOv && <div style={{textAlign:"center", marginTop:6, fontSize:10, color:"#e879c9", fontFamily:"system-ui"}}>{tOv==="push" ? "Set to a push manually" : "Winner set manually — overrides points"}</div>}
               {props.canEdit && (
                 <div style={{marginTop:10, display:"flex", gap:6, alignItems:"center", flexWrap:"wrap", justifyContent:"center"}}>
                   <span style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>Set winner:</span>
                   <button onClick={function(){ setTeamWinner(tOv==="a"?null:"a"); }} style={Object.assign({},S.pillBtn,{fontSize:11,padding:"4px 10px"}, tOv==="a"?{borderColor:"#22c55e",color:"#22c55e"}:{})}>{matchup.teamA.name}</button>
                   <button onClick={function(){ setTeamWinner(tOv==="b"?null:"b"); }} style={Object.assign({},S.pillBtn,{fontSize:11,padding:"4px 10px"}, tOv==="b"?{borderColor:"#22c55e",color:"#22c55e"}:{})}>{matchup.teamB.name}</button>
+                  <button onClick={function(){ setTeamWinner(tOv==="push"?null:"push"); }} style={Object.assign({},S.pillBtn,{fontSize:11,padding:"4px 10px"}, tOv==="push"?{borderColor:CL.muted,color:"#fff",background:"rgba(255,255,255,0.08)"}:{})}>Push</button>
                   {tOv && <button onClick={function(){ setTeamWinner(null); }} style={{fontSize:10,color:CL.muted,fontFamily:"system-ui",background:"none",border:"none",cursor:"pointer",textDecoration:"underline"}}>↩ Auto</button>}
                 </div>
               )}
@@ -3889,9 +3893,10 @@ function BetsTab(props) {
                           var mpRes = isMP ? foursomeMatchPlay(scores, players, m.pairA, m.pairB, ri) : null;
                           var aPts = pairLive(m.pairA, ri), bPts = pairLive(m.pairB, ri); // Stableford points (Ardglass)
                           var aHoles = mpRes ? mpRes.aHoles : 0, bHoles = mpRes ? mpRes.bHoles : 0;
-                          var fOv = (manualWinners.foursome || {})[m.id]; // "A" | "B" | undefined (Carl override)
+                          var fOv = (manualWinners.foursome || {})[m.id]; // "A" | "B" | "push" | undefined (Carl override)
+                          var isPush = fOv === "push";
                           var started = !!fOv || (isMP ? !!(mpRes && (aHoles + bHoles + mpRes.halved) > 0) : (aPts !== null || bPts !== null));
-                          var decided = fOv ? true : (isMP ? (roundFinal && mpRes && aHoles !== bHoles)
+                          var decided = fOv ? !isPush : (isMP ? (roundFinal && mpRes && aHoles !== bHoles)
                                              : (roundFinal && aPts !== null && bPts !== null && aPts !== bPts));
                           var aWin = fOv ? fOv === "A" : (decided && (isMP ? aHoles > bHoles : aPts > bPts));
                           var bWin = fOv ? fOv === "B" : (decided && (isMP ? bHoles > aHoles : bPts > aPts));
@@ -3931,7 +3936,9 @@ function BetsTab(props) {
                                 <div style={{display:"flex", alignItems:"center", color:CL.muted, fontWeight:700, fontFamily:"system-ui", fontSize:13}}>vs</div>
                                 {sideBox(m.pairB, bWin)}
                               </div>
-                              {decided ? (
+                              {isPush ? (
+                                <div style={{textAlign:"center", marginTop:8, fontSize:13, fontWeight:700, color:CL.muted, fontFamily:"system-ui"}}>Push — no money moves</div>
+                              ) : decided ? (
                                 <div style={{textAlign:"center", marginTop:8, fontSize:13, fontWeight:700, color:"#22c55e", fontFamily:"system-ui"}}>{"🏆 "+fName(aWin?m.pairA[0]:m.pairB[0]).split(" ")[1]+" & "+fName(aWin?m.pairA[1]:m.pairB[1]).split(" ")[1]+" win"+(isMP ? " · "+Math.max(aHoles,bHoles)+"–"+Math.min(aHoles,bHoles)+" holes" : "")+" · each winner +$"+(Math.round(coreWinEach*100)/100)}</div>
                               ) : roundFinal ? (
                                 <div style={{textAlign:"center", marginTop:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>All square — no money moves</div>
@@ -3942,12 +3949,13 @@ function BetsTab(props) {
                               ) : (
                                 <div style={{textAlign:"center", marginTop:8, fontSize:12, color:CL.muted, fontFamily:"system-ui"}}>Not started</div>
                               )}
-                              {fOv && <div style={{textAlign:"center", marginTop:4, fontSize:10, color:"#e879c9", fontFamily:"system-ui"}}>Winner set manually — overrides scores</div>}
+                              {fOv && <div style={{textAlign:"center", marginTop:4, fontSize:10, color:"#e879c9", fontFamily:"system-ui"}}>{isPush ? "Set to a push manually" : "Winner set manually — overrides scores"}</div>}
                               {props.canEdit && (
                                 <div style={{marginTop:8, display:"flex", gap:6, alignItems:"center", flexWrap:"wrap", justifyContent:"center"}}>
                                   <span style={{fontSize:10, color:CL.muted, fontFamily:"system-ui"}}>Set winner:</span>
                                   <button onClick={function(){ setFoursomeWinner(m.id, fOv==="A"?null:"A"); }} style={Object.assign({},S.pillBtn,{fontSize:11,padding:"4px 9px"}, fOv==="A"?{borderColor:"#22c55e",color:"#22c55e"}:{})}>{fName(m.pairA[0]).split(" ")[0]+" & "+fName(m.pairA[1]).split(" ")[0]}</button>
                                   <button onClick={function(){ setFoursomeWinner(m.id, fOv==="B"?null:"B"); }} style={Object.assign({},S.pillBtn,{fontSize:11,padding:"4px 9px"}, fOv==="B"?{borderColor:"#22c55e",color:"#22c55e"}:{})}>{fName(m.pairB[0]).split(" ")[0]+" & "+fName(m.pairB[1]).split(" ")[0]}</button>
+                                  <button onClick={function(){ setFoursomeWinner(m.id, fOv==="push"?null:"push"); }} style={Object.assign({},S.pillBtn,{fontSize:11,padding:"4px 9px"}, isPush?{borderColor:CL.muted,color:"#fff",background:"rgba(255,255,255,0.08)"}:{})}>Push</button>
                                   {fOv && <button onClick={function(){ setFoursomeWinner(m.id, null); }} style={{fontSize:10,color:CL.muted,fontFamily:"system-ui",background:"none",border:"none",cursor:"pointer",textDecoration:"underline"}}>↩ Auto</button>}
                                 </div>
                               )}
