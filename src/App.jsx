@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { subscribeToState, saveState as firebaseSave, saveScorePath, saveFoursomeBack, saveFoursomeUnback, savePropUnits, saveOuUnits, subscribeToChat, sendChatMessage, deleteChatMessage } from "./firebase";
 
 // ─── DATA ────────────────────────────────────────────────────────────
-const APP_VERSION = "4.9";
+const APP_VERSION = "5.0";
 // Disabled feature flag — flip to true to re-enable the (incomplete) Match Play tab.
 var SHOW_MATCH_PLAY = false;
 // Skins and Individual Gross Stableford were removed to simplify the bet menu.
@@ -181,9 +181,9 @@ const DEFAULT_FOURSOME_MATCHES = [
   // Castlerock — M/D v B/R ; S/E v C/J
   { id:"fm2a", course:"Castlerock", courseIdx:2, pairA:["p4","p3"], pairB:["p2","p7"], backersA:[], backersB:[], stake:STAKE_FOURSOME },
   { id:"fm2b", course:"Castlerock", courseIdx:2, pairA:["p5","p8"], pairB:["p6","p1"], backersA:[], backersB:[], stake:STAKE_FOURSOME },
-  // Royal Portrush — MM/SL v DD/JA ; BS/CS v EF/RC
-  { id:"fm3a", course:"Royal Portrush", courseIdx:3, pairA:["p4","p5"], pairB:["p3","p1"], backersA:[], backersB:[], stake:STAKE_FOURSOME },
-  { id:"fm3b", course:"Royal Portrush", courseIdx:3, pairA:["p2","p6"], pairB:["p8","p7"], backersA:[], backersB:[], stake:STAKE_FOURSOME },
+  // Royal Portrush — JA/RC v MM/SL ; CS/BS v EF/DD
+  { id:"fm3a", course:"Royal Portrush", courseIdx:3, pairA:["p1","p7"], pairB:["p4","p5"], backersA:[], backersB:[], stake:STAKE_FOURSOME },
+  { id:"fm3b", course:"Royal Portrush", courseIdx:3, pairA:["p6","p2"], pairB:["p8","p3"], backersA:[], backersB:[], stake:STAKE_FOURSOME },
   // Portstewart — M/R v S/C ; B/E v D/J
   { id:"fm4a", course:"Portstewart", courseIdx:4, pairA:["p4","p7"], pairB:["p5","p6"], backersA:[], backersB:[], stake:STAKE_FOURSOME },
   { id:"fm4b", course:"Portstewart", courseIdx:4, pairA:["p2","p8"], pairB:["p3","p1"], backersA:[], backersB:[], stake:STAKE_FOURSOME },
